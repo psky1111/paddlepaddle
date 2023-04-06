@@ -7,8 +7,30 @@ from paddle.nn import functional as F
 from paddle import nn
 from models.weight_init import interpolate_pos_embed
 from models import GatherLayer
+from paddle.nn.initializer import Assign, Normal, Constant
+
 
 __all__ = ["CVLP_r50", "CVLP_vit16"]
+
+class Identity(nn.Layer):
+    def __init__(self):
+        super(Identity, self).__init__()
+
+    def forward(self, inputs):
+        return inputs
+
+
+class QuickGELU(nn.Layer):
+    def forward(self, x):
+        return x * nn.functional.sigmoid(1.702 * x)
+    
+class MultiHeadAttention(nn.MultiHeadAttention):
+    def __init__(self,
+                 embed_dim,
+                 num_heads,
+                 output_dim=None):
+        super(MultiHeadAttention, self).__init__(embed_dim, num_heads)
+        self.out_proj = nn.Linear(embed_dim, output_dim or embed_dim)
 
 class Bottleneck(nn.Layer):
     expansion = 4
@@ -28,18 +50,17 @@ class Bottleneck(nn.Layer):
         self.conv3 = nn.Conv2D(planes, planes * self.expansion, 1, bias_attr=False)
         self.bn3 = nn.BatchNorm2D(planes * self.expansion)
 
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU()
         self.downsample = None
         self.stride = stride
-        self.multi_head_attention_forward = nn.MultiHeadAttention()
 
         if stride > 1 or inplanes != planes * Bottleneck.expansion:
             # downsampling layer is prepended with an avgpool, and the subsequent convolution has stride 1
-            self.downsample = nn.Sequential(OrderedDict([
+            self.downsample = nn.Sequential(
                 ("-1", nn.AvgPool2D(stride)),
                 ("0", nn.Conv2D(inplanes, planes * self.expansion, 1, stride=1, bias_attr=False)),
                 ("1", nn.BatchNorm2D(planes * self.expansion))
-            ]))
+            )
 
     def forward(self, x: paddle.Tensor):
         identity = x
@@ -60,11 +81,18 @@ class Bottleneck(nn.Layer):
 class AttentionPool2d(nn.Layer):
     def __init__(self, spacial_dim: int, embed_dim: int, num_heads: int, output_dim: int = None):
         super().__init__()
-        self.positional_embedding = paddle.randn(spacial_dim ** 2 + 1, embed_dim) / embed_dim ** 0.5
-        self.MultiheadAttention = nn.MultiHeadAttention(embed_dim,output_dim or embed_dim)
-        self.num_heads = num_heads
+        self.positional_embedding = self.create_parameter(
+            shape=(spacial_dim ** 2 + 1, embed_dim),
+            default_initializer=Assign(
+                paddle.randn((spacial_dim ** 2 + 1, embed_dim)) /
+                embed_dim ** 0.5
+            )
+        )
+        self.add_parameter("positional_embedding", self.positional_embedding)
 
-    def forward(self, x):
+        self.attn = MultiHeadAttention(embed_dim, num_heads, output_dim)
+
+    def forward(self, x:paddle.Tensor):
         x = paddle.reshape(x,(x.shape[0], x.shape[1], x.shape[2] * x.shape[3]))
         x = paddle.transpose(x,(2, 0, 1)) # NCHW -> (HW)NC
         x = paddle.concat([paddle.mean(x,axis=0,keepdim=True),x],axis=0) # (HW+1)NC
@@ -72,7 +100,8 @@ class AttentionPool2d(nn.Layer):
         #x = x + self.positional_embedding[:, None, :].to(x.dtype)  # (HW+1)NC
         x = x + paddle.cast(self.positional_embedding[:,None,:],x.dtype)
         
-        x = self.MultiheadAttention(query=x, key=x, value=x)
+        x = self.attn(query=x, key=x, value=x)
+
         """
         x, _ = F.multi_head_attention_forward(
             query=x, key=x, value=x,
@@ -167,10 +196,6 @@ class LayerNorm(nn.LayerNorm):
         return paddle.cast(ret,orig_type)
 
 
-class QuickGELU(nn.Layer):
-    def forward(self, x: paddle.Tensor):
-        return x * F.sigmoid(1.702 * x)
-
 
 class ResidualAttentionBlock(nn.Layer):
     def __init__(self, d_model: int, n_head: int, attn_mask: paddle.Tensor = None):
@@ -178,11 +203,11 @@ class ResidualAttentionBlock(nn.Layer):
 
         self.attn = nn.MultiHeadAttention(d_model, n_head)
         self.ln_1 = LayerNorm(d_model)
-        self.mlp = nn.Sequential(OrderedDict([
+        self.mlp = nn.Sequential(
             ("c_fc", nn.Linear(d_model, d_model * 4)),
             ("gelu", QuickGELU()),
             ("c_proj", nn.Linear(d_model * 4, d_model))
-        ]))
+        )
         self.ln_2 = LayerNorm(d_model)
         self.attn_mask = attn_mask
 
@@ -215,14 +240,34 @@ class VisionTransformer(nn.Layer):
         self.conv1 = nn.Conv2D(in_channels=3, out_channels=width, kernel_size=patch_size, stride=patch_size, bias_attr=False)
 
         scale = width ** -0.5
-        self.class_embedding = scale * paddle.randn(width)
-        self.positional_embedding = scale * paddle.randn((input_resolution // patch_size) ** 2 + 1, width)
+        self.class_embedding = scale * self.create_parameter(
+            shape=(width,),
+            default_initializer=Assign(
+                scale * paddle.randn((width,))
+            )
+        )
+        self.add_parameter("class_embedding", self.class_embedding)
+        self.positional_embedding = self.create_parameter(
+            shape=(width,),
+            default_initializer=Assign(
+                scale *
+                paddle.randn(
+                    ((input_resolution // patch_size) ** 2 + 1, width))
+            )
+        )
+        self.add_parameter("positional_embedding", self.positional_embedding)
         self.ln_pre = LayerNorm(width)
 
         self.transformer = Transformer(width, layers, heads)
 
         self.ln_post = LayerNorm(width)
-        self.proj = scale * paddle.randn(width, output_dim)
+        self.proj = self.create_parameter(
+            shape=(width,),
+            default_initializer=Assign(
+                scale * paddle.randn(((width, output_dim)))
+            )
+        )
+        self.add_parameter("proj", self.proj)
 
     def forward(self, x: paddle.Tensor):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
@@ -289,7 +334,7 @@ class CVLP(nn.Layer):
                 heads=vision_heads,
                 output_dim=embed_dim
             )
-
+        self.embed_dim = embed_dim
         self.transformer = Transformer(
             width=transformer_width,
             layers=transformer_layers,
@@ -299,27 +344,45 @@ class CVLP(nn.Layer):
 
         self.vocab_size = vocab_size
         self.token_embedding = nn.Embedding(vocab_size, transformer_width)
-        self.positional_embedding = paddle.empty(self.context_length, transformer_width)
+        self.positional_embedding = self.create_parameter(
+            shape=(self.context_length, transformer_width),
+            default_initializer=Assign(
+                paddle.empty((self.context_length, transformer_width))
+            )
+        )
+        self.add_parameter("positional_embedding", self.positional_embedding)
         self.ln_final = LayerNorm(transformer_width)
 
-        self.text_projection = paddle.empty(transformer_width, embed_dim)
-        self.logit_scale = paddle.ones([]) * np.log(1 / 0.07)
+        self.text_projection = self.create_parameter(
+            shape=(transformer_width, embed_dim),
+            default_initializer=Assign(
+                paddle.empty((transformer_width, embed_dim))
+            )
+        )
+        self.add_parameter("text_projection", self.text_projection)
+        self.logit_scale = self.create_parameter(
+            shape=(1,),
+            default_initializer=Assign(paddle.ones([1]))
+        )
+        self.add_parameter("logit_scale", self.logit_scale)
+        
 
         self.initialize_parameters(args.pretrained_clip)
 
     def initialize_parameters(self, pretrained_clip):
-        self.token_embedding.weight.set_value(paddle.normal(std=0.02))
+        Normal(std=0.02)(self.token_embedding.weight)
+        Normal(std=0.01)(self.positional_embedding)
         #nn.init.normal_(self.token_embedding.weight, std=0.02)
         #nn.init.normal_(self.positional_embedding, std=0.01)
-        self.positional_embedding.set_value(paddle.normal(std=0.01))
         #nn.initializer.normal()
         if isinstance(self.visual, ModifiedResNet):
             if self.visual.attnpool is not None:
-                std = self.visual.attnpool.c_proj.in_features ** -0.5
-                self.visual.attnpool.q_proj.weight.set_value(paddle.normal(std=std))
-                self.visual.attnpool.k_proj.weight.set_value(paddle.normal(std=std))
-                self.visual.attnpool.v_proj.weight.set_value(paddle.normal(std=std))
-                self.visual.attnpool.c_proj.weight.set_value(paddle.normal(std=std))
+                std = self.embed_dim ** -0.5
+                normal_ = Normal(std=std)
+                normal_(self.visual.attnpool.attn.q_proj.weight)
+                normal_(self.visual.attnpool.attn.k_proj.weight)
+                normal_(self.visual.attnpool.attn.v_proj.weight)
+                normal_(self.visual.attnpool.attn.out_proj.weight)
                 #nn.init.normal_(self.visual.attnpool.q_proj.weight, std=std)
                 #nn.init.normal_(self.visual.attnpool.k_proj.weight, std=std)
                 #nn.init.normal_(self.visual.attnpool.v_proj.weight, std=std)
@@ -329,15 +392,21 @@ class CVLP(nn.Layer):
                 for name, param in resnet_block.named_parameters():
                     if name.endswith("bn3.weight"):
                         #nn.init.zeros_(param)
-                        param.set_value(paddle.zeros_like(param.weight))
+                         Constant(value=0.0)(param)
         proj_std = (self.transformer.width ** -0.5) * ((2 * self.transformer.layers) ** -0.5)
         attn_std = self.transformer.width ** -0.5
         fc_std = (2 * self.transformer.width) ** -0.5
         for block in self.transformer.resblocks:
-            block.attn.in_proj_weight.set_value(paddle.normal(std=attn_std))
-            block.attn.out_proj.weight.set_value(paddle.normal(std=proj_std))
-            block.mlp.c_fc.weight.set_value(paddle.normal(std=fc_std))
-            block.mlp.c_proj.weight.set_value(paddle.normal(std=proj_std))
+
+            normal_ = Normal(std = attn_std)
+            normal_(block.attn.q_proj.weight)
+            normal_(block.attn.k_proj.weight)
+            normal_(block.attn.v_proj.weight)
+
+
+            Normal(std=proj_std)(block.attn.out_proj.weight)
+            Normal(std=fc_std)(block.mlp.c_fc.weight)
+            Normal(std=proj_std)(block.mlp.c_proj.weight)
             #nn.init.normal_(block.attn.in_proj_weight, std=attn_std)
             #nn.init.normal_(block.attn.out_proj.weight, std=proj_std)
             #nn.init.normal_(block.mlp.c_fc.weight, std=fc_std)
@@ -345,9 +414,10 @@ class CVLP(nn.Layer):
 
         if self.text_projection is not None:
             #nn.init.normal_(self.text_projection, std=self.transformer.width ** -0.5)
-            self.text_projection.set_value(paddle.normal(std=self.transformer.width ** -0.5))
+            Normal(std=self.transformer.width ** -0.5)(self.text_projection)
         if pretrained_clip is not None:
-            pretrained_state_dict = paddle.jit.load(pretrained_clip).state_dict()
+            pretrained_state_dict = paddle.load(pretrained_clip)
+            #pretrained_state_dict = model.state_dict()
             for key in ["input_resolution", "context_length", "vocab_size"]:
                 if key in pretrained_state_dict:
                     del pretrained_state_dict[key]
@@ -358,7 +428,7 @@ class CVLP(nn.Layer):
                                                         new_size, num_extra_tokens=num_extra_tokens)
                 pretrained_state_dict['visual.positional_embedding'] = new_pos_embed
 
-            info = self.set_state_dict(pretrained_state_dict, strict=False)
+            info = self.set_state_dict(pretrained_state_dict)
             print('loaded pretrained clip.')
             print(info)
 
@@ -366,7 +436,7 @@ class CVLP(nn.Layer):
     def build_attention_mask(self):
         # lazily create causal attention mask, with full attention between the vision tokens
         # pytorch uses additive attention mask; fill with -inf
-        mask = paddle.empty(self.context_length, self.context_length)
+        mask = paddle.empty((self.context_length, self.context_length))
         mask = paddle.full_like(mask,float("-inf"))
         #mask.fill_(float("-inf"))
         mask = paddle.triu(mask)

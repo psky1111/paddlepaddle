@@ -1,6 +1,6 @@
 import os
 import os.path as osp
-import mmcv
+
 
 from .image_list import ImageList
 

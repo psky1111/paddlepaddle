@@ -1,91 +1,90 @@
+from paddle.io import DataLoader,Dataset,ComposeDataset
+from paddle.vision import transforms
 import os
-import json
-from re import split
+from PIL import Image
 
-from torchvision import datasets, transforms
-from torchvision.datasets.folder import ImageFolder, default_loader
+# Data transformation with augmentation
+data_transforms = {
+    'train': transforms.Compose([
+        transforms.RandomResizedCrop(224),
+        transforms.RandomHorizontalFlip(),
+        transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ]),
+    'val': transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ]),
+    'test': transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+}
 
-from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from timm.data import create_transform
-from mcloader import ClassificationDataset
+# Dataset
+class LT_Dataset(Dataset):
+    
+    def __init__(self, root, txt, transform=None):
+        self.img_path = []
+        self.labels = []
+        self.transform = transform
+        with open(txt) as f:
+            for line in f:
+                self.img_path.append(os.path.join(root, line.split()[0]))
+                self.labels.append(int(line.split()[1]))
+        
+    def __len__(self):
+        return len(self.labels)
+        
+    def __getitem__(self, index):
 
+        path = self.img_path[index]
+        label = self.labels[index]
+        
+        with open(path, 'rb') as f:
+            sample = Image.open(f).convert('RGB')
+        
+        if self.transform is not None:
+            sample = self.transform(sample)
 
-CLIP_DEFAULT_MEAN = (0.4815, 0.4578, 0.4082)
-CLIP_DEFAULT_STD  = (0.2686, 0.2613, 0.2758)
+        return sample, label, path
 
+# Load datasets
+def load_data(data_root, dataset, phase, batch_size, sampler_dic=None, num_workers=4, test_open=False, shuffle=True):
+    
+    txt = './data/%s/%s_%s.txt'%(dataset, dataset, (phase if phase != 'train_plain' else 'train'))
 
-def build_dataset(split, args):
-    assert split in ['train', 'test', 'val']
-    is_train = split == "train"
-    transform = build_transform(is_train, args)
+    print('Loading data from %s' % (txt))
 
-    assert args.data_set in ['PLACES_LT', 'INAT', 'IMNET', 'IMNET_LT']
-    if args.data_set == "INAT":
-        nb_classes = 8142
-    elif args.data_set == "PLACES_LT":
-        nb_classes = 365
+    if phase not in ['train', 'val']:
+        transform = data_transforms['test']
     else:
-        nb_classes = 1000
-    dataset = ClassificationDataset(
-        args.data_set,
-        split,
-        nb_classes=nb_classes,
-        desc_path=args.desc_path,
-        context_length=args.context_length,
-        pipeline=transform,
-        select=args.select
-    )
-    nb_classes = dataset.nb_classes
+        transform = data_transforms[phase]
 
-    return dataset, nb_classes
+    print('Use data transformation:', transform)
 
+    set_ = LT_Dataset(data_root, txt, transform)
 
-def build_transform(is_train, args):
-    resize_im = args.input_size > 32
-    DEFAULT_MEAN = CLIP_DEFAULT_MEAN if args.clip_ms else IMAGENET_DEFAULT_MEAN
-    DEFAULT_STD  = CLIP_DEFAULT_STD  if args.clip_ms else IMAGENET_DEFAULT_STD
-    if is_train:
-        if args.aa == "":
-            print("no auto augment")
-            # use simple transform when dataset is IMNET_LT
-            transform = transforms.Compose([
-                transforms.RandomResizedCrop(args.input_size),
-                transforms.RandomHorizontalFlip(),
-                transforms.ColorJitter(
-                    brightness=0.4, contrast=0.4, saturation=0.4, hue=0),
-                transforms.ToTensor(),
-                transforms.Normalize(DEFAULT_MEAN, DEFAULT_STD)
-            ])
-            return transform
+    if phase == 'test' and test_open:
+        open_txt = './data/%s/%s_open.txt'%(dataset, dataset)
+        print('Testing with opensets from %s'%(open_txt))
+        open_set_ = LT_Dataset('./data/%s/%s_open'%(dataset, dataset), open_txt, transform)
+        set_ = ComposeDataset([set_, open_set_])
 
-        # this should always dispatch to transforms_imagenet_train
-        transform = create_transform(
-            input_size=args.input_size,
-            is_training=True,
-            color_jitter=args.color_jitter,
-            auto_augment=args.aa,
-            interpolation=args.train_interpolation,
-            re_prob=args.reprob,
-            re_mode=args.remode,
-            re_count=args.recount,
-            mean=DEFAULT_MEAN,
-            std=DEFAULT_STD,
-        )
-        if not resize_im:
-            # replace RandomResizedCropAndInterpolation with
-            # RandomCrop
-            transform.transforms[0] = transforms.RandomCrop(
-                args.input_size, padding=4)
-        return transform
-
-    t = []
-    if resize_im:
-        size = int((256 / 224) * args.input_size)
-        t.append(
-            transforms.Resize(size, interpolation=3),  # to maintain same ratio w.r.t. 224 images
-        )
-        t.append(transforms.CenterCrop(args.input_size))
-
-    t.append(transforms.ToTensor())
-    t.append(transforms.Normalize(DEFAULT_MEAN, DEFAULT_STD))
-    return transforms.Compose(t)
+    if sampler_dic and phase == 'train':
+        print('Using sampler.')
+        print('Sample %s samples per-class.' % sampler_dic['num_samples_cls'])
+        return DataLoader(dataset=set_, batch_size=batch_size, shuffle=False,
+                           sampler=sampler_dic['sampler'](set_, sampler_dic['num_samples_cls']),
+                           num_workers=num_workers)
+    else:
+        print('No sampler.')
+        print('Shuffle is %s.' % (shuffle))
+        return DataLoader(dataset=set_, batch_size=batch_size,
+                          shuffle=shuffle, num_workers=num_workers)
+        

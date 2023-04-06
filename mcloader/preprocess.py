@@ -5,7 +5,7 @@ from tqdm import tqdm
 from typing import Dict, List, Union
 
 import torch
-from clip.simple_tokenizer import SimpleTokenizer
+from clip.tokenizer import Tokenizer
 
 from .prompt_template import prompt_templates
 
@@ -43,7 +43,7 @@ class SentPreProcessor(object):
                                 "wid": l[0].strip()} for l in _lines]
             self.categories.sort(key=lambda x: x["wid"])
         self.drop_keys = ['External links', 'References', 'Further reading', 'Bibliography']
-        self._tokenizer = SimpleTokenizer()
+        self._tokenizer = Tokenizer()
         self.SEP_TOKENS = [267, 269]  # [',', '.']
         self.wikis = None
 
