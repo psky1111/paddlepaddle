@@ -1,0 +1,3 @@
+pip install ftfy regex tqdm
+pip install git+https://github.com/openai/CLIP.git
+pip install mmcv==1.3.14
