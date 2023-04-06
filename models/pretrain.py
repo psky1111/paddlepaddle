@@ -212,8 +212,8 @@ class ResidualAttentionBlock(nn.Layer):
         self.attn_mask = attn_mask
 
     def attention(self, x: paddle.Tensor):
-        self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device) if self.attn_mask is not None else None
-        return self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask)[0]
+        self.attn_mask = self.attn_mask if self.attn_mask is not None else None
+        return self.attn(x, x, x, attn_mask=self.attn_mask)[0]
 
     def forward(self, x: paddle.Tensor):
         x = x + self.attention(self.ln_1(x))
@@ -458,7 +458,9 @@ class CVLP(nn.Layer):
         x = x + paddle.cast(self.positional_embedding,self.dtype)
         x = paddle.transpose(x,(1,0,2))
         #x = x.permute(1, 0, 2)  # NLD -> LND
+        
         x = self.transformer(x)
+
         x = paddle.transpose(x,(1,0,2))
         #x = x.permute(1, 0, 2)  # LND -> NLD
         x = paddle.cast(self.ln_final(x),self.dtype)

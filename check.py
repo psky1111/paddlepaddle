@@ -19,7 +19,7 @@ def get_args_parser():
 
     # NLP parameters
     parser.add_argument('--desc-path', default='', type=str)
-    parser.add_argument('--context-length', default=0, type=int, help='max length of text description')
+    parser.add_argument('--context-length', default=75, type=int, help='max length of text description')
     parser.add_argument('--sent-length', default=64, type=int, help='max number of selected sentences')
     parser.add_argument('--cls-token-length', default=1, type=int, help='the length of cls token')
     parser.add_argument('--loss-type', default='CE', type=str, help='loss type')
