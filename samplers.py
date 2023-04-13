@@ -3,7 +3,7 @@ from typing import TypeVar, Optional, Iterator, Sequence
 
 import paddle
 import paddle.distributed as dist
-from paddle.io import Dataset, dataset
+from paddle.io import Dataset
 
 class RASampler(paddle.io.Sampler):
     """Sampler that restricts data loading to a subset of the dataset for distributed,
@@ -15,12 +15,8 @@ class RASampler(paddle.io.Sampler):
 
     def __init__(self, dataset, num_replicas=None, rank=None, shuffle=True):
         if num_replicas is None:
-            if not dist.is_available():
-                raise RuntimeError("Requires distributed package to be available")
             num_replicas = dist.get_world_size()
         if rank is None:
-            if not dist.is_available():
-                raise RuntimeError("Requires distributed package to be available")
             rank = dist.get_rank()
         self.dataset = dataset
         self.num_replicas = num_replicas
@@ -101,12 +97,8 @@ class WeightedDistributedSampler(paddle.io.Sampler):
                  num_replicas: Optional[int] = None, rank: Optional[int] = None, 
                  deterministic: bool = True, seed: int = 0) -> None:
         if num_replicas is None:
-            if not dist.is_available():
-                raise RuntimeError("Requires distributed package to be available")
             num_replicas = dist.get_world_size()
         if rank is None:
-            if not dist.is_available():
-                raise RuntimeError("Requires distributed package to be available")
             rank = dist.get_rank()
         self.dataset = dataset
         self.num_replicas = num_replicas
