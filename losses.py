@@ -1,6 +1,7 @@
 import paddle
 import paddle.nn as nn
 from paddle.nn import functional as F
+from utils import create_model
 
 def cross_entropy(outputs, teacher_outputs):
     logprobs = F.log_softmax(outputs, dim=-1)
@@ -64,16 +65,7 @@ class PretrainSentLoss(nn.Layer):
             assert self.distill_type.startswith("logits")
             ######need to rechange
             teacher_model = args.teacher_model if args.teacher_model else args.model
-            self.teacher_model = create_model(
-                    teacher_model,
-                    pretrained=args.pretrained,
-                    num_classes=args.nb_classes,
-                    drop_rate=args.drop,
-                    drop_path_rate=args.drop_path,
-                    drop_block_rate=None,
-                    dataset=None,
-                    args=args
-                )
+            self.teacher_model = create_model()
             if args.teacher_path:
                 self.teacher_model.initialize_parameters(args.teacher_path)
             self.teacher_model.requires_grad_(False)

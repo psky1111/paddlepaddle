@@ -2,6 +2,10 @@ from paddle.io import DataLoader,Dataset,ComposeDataset
 from paddle.vision import transforms
 import os
 from PIL import Image
+from mcloader import ClassificationDataset
+
+
+
 
 # Data transformation with augmentation
 data_transforms = {
@@ -54,6 +58,24 @@ class LT_Dataset(Dataset):
 
         return sample, label, path
 
+def build_dataset(split, args):
+    assert split in ['train', 'test', 'val']
+    transform = data_transforms[split]
+
+    assert args.data_set in ['IMNET_LT']
+    nb_classes = 1000
+    dataset = ClassificationDataset(
+        args.data_set,
+        split,
+        nb_classes=nb_classes,
+        desc_path=args.desc_path,
+        context_length=args.context_length,
+        pipeline=transform,
+        select=args.select
+    )
+    nb_classes = dataset.nb_classes
+
+    return dataset, nb_classes
 # Load datasets
 def load_data(data_root, dataset, phase, batch_size, sampler_dic=None, num_workers=4, test_open=False, shuffle=True):
     
@@ -87,4 +109,3 @@ def load_data(data_root, dataset, phase, batch_size, sampler_dic=None, num_worke
         print('Shuffle is %s.' % (shuffle))
         return DataLoader(dataset=set_, batch_size=batch_size,
                           shuffle=shuffle, num_workers=num_workers)
-        

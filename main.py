@@ -3,11 +3,10 @@ import datetime
 from functools import partial
 import numpy as np
 import time
-import torch
-import torch.backends.cudnn as cudnn
+
 import json
 import paddle
-
+from paddle import nn
 from pathlib import Path
 
 
@@ -19,9 +18,8 @@ from engine import calc_class_acc, evaluate_LT, evaluate_pretrain, train_one_epo
 from optim_factory import create_optimizer
 from mixup import Mixup
 
-import models
 import utils
-import collections
+from utils import create_model,NativeScaler,SoftTargetCrossEntropy
 import os.path as osp
 import warnings
 
@@ -237,7 +235,6 @@ def main(args):
     np.random.seed(seed)
     # random.seed(seed)
 
-    cudnn.benchmark = True
 
     dataset_train, args.nb_classes = build_dataset(split="train", args=args)
     if args.test:
@@ -254,7 +251,7 @@ def main(args):
         elif args.weight_sample:
             training_labels = np.array(dataset_train.targets).astype(int)
             train_class_counts = [len(training_labels[training_labels == l]) for l in range(args.nb_classes)]
-            weights = 1. / torch.tensor(train_class_counts, dtype=torch.float)
+            weights = 1. / paddle.to_tensor(train_class_counts, dtype=paddle.float32)
             if args.use_sqrt_freq: weights.sqrt_()
             samples_weights = weights[list(dataset_train.targets)]
             sampler_train = WeightedDistributedSampler(
@@ -262,7 +259,7 @@ def main(args):
                 num_replicas=num_tasks, rank=global_rank, deterministic=True
             )
         else:
-            sampler_train = torch.utils.data.DistributedSampler(
+            sampler_train = paddle.io.DistributedBatchSampler(
                 dataset_train,
                 num_replicas=num_tasks,
                 # num_replicas=0,
@@ -275,18 +272,18 @@ def main(args):
                 print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. '
                       'This will slightly alter validation results as extra duplicate entries are added to achieve '
                       'equal num of samples per-process.')
-            sampler_val = torch.utils.data.DistributedSampler(
+            sampler_val = paddle.io.DistributedBatchSampler(
                 dataset_val,
                 # num_replicas=num_tasks,
                 num_replicas=0,
                 rank=global_rank, shuffle=False)
         else:
-            sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+            sampler_val = paddle.io.SequentialSampler(dataset_val)
     else:
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
 
-    data_loader_train = torch.utils.data.DataLoader(
+    data_loader_train = paddle.io.DataLoader(
         dataset_train, sampler=sampler_train,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
@@ -294,7 +291,7 @@ def main(args):
         drop_last=args.drop_last,
     )
 
-    data_loader_val = torch.utils.data.DataLoader(
+    data_loader_val =  paddle.io.DataLoader(
         dataset_val, sampler=sampler_val,
         batch_size=int(1.5 * args.batch_size),
         num_workers=args.num_workers,
@@ -303,8 +300,8 @@ def main(args):
     )
 
     if args.test:
-        data_loader_test = torch.utils.data.DataLoader(
-            dataset_test, sampler=torch.utils.data.SequentialSampler(dataset_test),
+        data_loader_test =  paddle.io.DataLoader(
+            dataset_test, sampler= paddle.io.SequentialSampler(dataset_test),
             batch_size=int(1.5 * args.batch_size),
             num_workers=args.num_workers,
             pin_memory=args.pin_mem,
@@ -322,31 +319,20 @@ def main(args):
         )
 
     print(f"Creating model: {args.model}")
-    model = create_model(
-        args.model,
-        pretrained=args.pretrained,
-        num_classes=args.nb_classes,
-        drop_rate=args.drop,
-        drop_path_rate=args.drop_path,
-        drop_block_rate=None,
-        dataset=dataset_train,
-        args=args
-    )
+    model = create_model()
 
-    model.to(device)
 
     model_ema = None
 
     model_without_ddp = model
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-        model_without_ddp = model.module
-    n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print('number of params:', n_parameters)
+        model = paddle.DataParallel(model)
+        model_without_ddp = model.sublayers()
 
-    optimizer = create_optimizer(args, model_without_ddp)
+    
     loss_scaler = NativeScaler()
-    lr_scheduler, _ = create_scheduler(args, optimizer)
+    lr_scheduler = paddle.optimizer.lr.CosineAnnealingDecay(args.lr,eta_min=1e-5, verbose=True)
+    optimizer = create_optimizer(args, model_without_ddp,lr_scheduler)
 
     criterion = LabelSmoothingCrossEntropy()
 
@@ -358,10 +344,10 @@ def main(args):
         assert args.loss_type == "smoothCE"
         criterion = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
     elif args.loss_type == "BCE":
-        criterion = torch.nn.BCEWithLogitsLoss()
+        criterion = nn.BCEWithLogitsLoss()
     else:
         assert args.loss_type == "CE"
-        criterion = torch.nn.CrossEntropyLoss()
+        criterion = nn.CrossEntropyLoss()
     print("using loss: ", str(criterion))
     if args.pretrain_cvlp:
         criterion = PretrainSentLoss(
@@ -380,12 +366,12 @@ def main(args):
     if args.resume:
         if args.resume.endswith('RN50.pt'):
             checkpoint = {}
-            checkpoint['model'] = torch.jit.load(args.resume, map_location='cpu').state_dict()
+            checkpoint['model'] =paddle.load(args.resume).state_dict()
         elif args.resume.startswith('https'):
-            checkpoint = torch.hub.load_state_dict_from_url(
+            checkpoint = paddle.hub.load_state_dict_from_url(
                 args.resume, map_location='cpu', check_hash=True)
         elif osp.exists(args.resume):
-            checkpoint = torch.load(args.resume, map_location='cpu')
+            checkpoint = paddle.load(args.resume, map_location='cpu')
         else:
             checkpoint = None
 
@@ -421,7 +407,7 @@ def main(args):
             prefix = 'train'
         print("eval dataset:", prefix)
         if args.test_p:
-            class_test_stats = calc_class_acc(data_loader, model, device,
+            class_test_stats = calc_class_acc(data_loader, model,
                                               args=args, tokens=None)
             if args.output_dir and utils.is_main_process():
                 with (output_dir / ("%s_%s_class.txt" % (args.data_set, prefix))).open("a") as f:
@@ -434,7 +420,7 @@ def main(args):
         else:
             eval_func = partial(evaluate_LT, args=args,
                                 tokens=None, labels=dataset_train.targets)
-        test_stats = eval_func(data_loader, model, device, prefix=prefix)
+        test_stats = eval_func(data_loader, model, prefix=prefix)
         log_stats = {f'{prefix}_{k}': v for k, v in test_stats.items()}
         if args.output_dir and utils.is_main_process():
             with (output_dir / "log.txt").open("a") as f:
@@ -447,14 +433,14 @@ def main(args):
     max_accuracy = 0.0
 
     for epoch in range(args.start_epoch, args.epochs):
-        loss_scaler._scaler = torch.cuda.amp.GradScaler(enabled=not args.fp32_resume)
+        loss_scaler._scaler = paddle.amp.GradScaler(enabled=not args.fp32_resume)
 
         if not args.debug:
             if args.distributed:
                 data_loader_train.sampler.set_epoch(epoch)
             train_stats = train_one_epoch(
                 model, criterion, data_loader_train,
-                optimizer, device, epoch, loss_scaler,
+                optimizer, epoch, loss_scaler,
                 args.clip_grad, model_ema, mixup_fn,
                 args=args
             )
@@ -478,10 +464,10 @@ def main(args):
 
         if args.pretrain_cvlp:
             if args.eval_pretrain:
-                test_stats = evaluate_pretrain(data_loader_val, model, device, args=args, 
+                test_stats = evaluate_pretrain(data_loader_val, model, args=args, 
                                         load_cache=False, labels=dataset_train.targets)
         else:
-            test_stats = evaluate_LT(data_loader_val, model, device, args=args,
+            test_stats = evaluate_LT(data_loader_val, model, args=args,
                                      tokens=None, labels=dataset_train.targets)
             print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
             max_accuracy = max(max_accuracy, test_stats["acc1"])
@@ -490,7 +476,7 @@ def main(args):
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      **{f'test_{k}': v for k, v in test_stats.items()},
                      'epoch': epoch,
-                     'n_parameters': n_parameters}
+                     }
 
         if args.output_dir and utils.is_main_process():
             with (output_dir / "log.txt").open("a") as f:
@@ -498,10 +484,10 @@ def main(args):
 
     if args.test:
         if args.pretrain_cvlp:
-            test_stats = evaluate_pretrain(data_loader_test, model, device, args=args, 
+            test_stats = evaluate_pretrain(data_loader_test, model, args=args, 
                                     load_cache=False, labels=dataset_train.targets, prefix='test')
         else:
-            test_stats = evaluate_LT(data_loader_test, model, device, args=args,
+            test_stats = evaluate_LT(data_loader_test, model, args=args,
                                      tokens=None, labels=dataset_train.targets, prefix='test')
         log_stats = {f'test_{k}': v for k, v in test_stats.items()}
         if args.output_dir and utils.is_main_process():

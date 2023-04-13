@@ -184,7 +184,14 @@ class ModifiedResNet(nn.Layer):
         x = self.attnpool(x)
 
         return x
-
+    
+class MultiHeadAttention(nn.MultiHeadAttention):
+    def __init__(self,
+                 embed_dim,
+                 num_heads,
+                 output_dim=None):
+        super(MultiHeadAttention, self).__init__(embed_dim, num_heads)
+        self.out_proj = nn.Linear(embed_dim, output_dim or embed_dim)
 
 class LayerNorm(nn.LayerNorm):
     """Subclass torch's LayerNorm to handle fp16."""
@@ -201,7 +208,7 @@ class ResidualAttentionBlock(nn.Layer):
     def __init__(self, d_model: int, n_head: int, attn_mask: paddle.Tensor = None):
         super().__init__()
 
-        self.attn = nn.MultiHeadAttention(d_model, n_head)
+        self.attn = MultiHeadAttention(d_model, n_head)
         self.ln_1 = LayerNorm(d_model)
         self.mlp = nn.Sequential(
             ("c_fc", nn.Linear(d_model, d_model * 4)),
@@ -439,7 +446,7 @@ class CVLP(nn.Layer):
         mask = paddle.empty((self.context_length, self.context_length))
         mask = paddle.full_like(mask,float("-inf"))
         #mask.fill_(float("-inf"))
-        mask = paddle.triu(mask)
+        mask = paddle.triu(mask,diagonal=1)
         #mask.triu_(1)  # zero out the lower diagonal
         return mask
 
@@ -456,19 +463,20 @@ class CVLP(nn.Layer):
         #x = self.token_embedding(text).type(self.dtype)  # [batch_size, n_ctx, d_model]
 
         x = x + paddle.cast(self.positional_embedding,self.dtype)
-        x = paddle.transpose(x,(1,0,2))
+        #x = paddle.transpose(x,(1,0,2))
         #x = x.permute(1, 0, 2)  # NLD -> LND
         
         x = self.transformer(x)
 
-        x = paddle.transpose(x,(1,0,2))
+        #x = paddle.transpose(x,(1,0,2))
         #x = x.permute(1, 0, 2)  # LND -> NLD
         x = paddle.cast(self.ln_final(x),self.dtype)
         #x = self.ln_final(x).type(self.dtype)
 
         # x.shape = [batch_size, n_ctx, transformer.width]
         # take features from the eot embedding (eot_token is the highest number in each sequence)
-        x = x[paddle.arange(x.shape[0]), text.argmax(dim=-1)] @ self.text_projection
+        _buff = paddle.argmax(text,axis=1)
+        x = x[paddle.arange(x.shape[0]), _buff] @ self.text_projection
 
         return x
 
@@ -478,8 +486,8 @@ class CVLP(nn.Layer):
         text_features = self.encode_text(text)
 
         # normalized features
-        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+        image_features = image_features / image_features.norm(axis=-1, keepdim=True)
+        text_features = text_features / text_features.norm(axis=-1, keepdim=True)
 
         if dist.is_initialized():
             image_features = paddle.concat(GatherLayer.apply(image_features), 0)
@@ -488,7 +496,7 @@ class CVLP(nn.Layer):
         # cosine similarity as logits
         logit_scale = paddle.exp(self.logit_scale) 
         logits_per_image = logit_scale * image_features @ text_features.t()
-        logits_per_text = logits_per_image.transpose(0, 1)
+        logits_per_text = logits_per_image.transpose((0, 1))
 
         # shape = [global_batch_size, global_batch_size]
         return logits_per_image, logits_per_text

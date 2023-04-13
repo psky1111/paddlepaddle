@@ -121,7 +121,7 @@ def train_one_epoch(model: paddle.nn.Layer, criterion: DistillationLoss,
 
 
 @paddle.no_grad()
-def evaluate(data_loader, model, device, args=None, tokens=None):
+def evaluate(data_loader, model, args=None, tokens=None):
     two_branch = args.two_branch
 
     criterion = paddle.nn.CrossEntropyLoss()
@@ -132,11 +132,11 @@ def evaluate(data_loader, model, device, args=None, tokens=None):
     # switch to evaluation mode
     model.eval()
 
-    texts = tokens.to(device, non_blocking=True)
+    texts = tokens
 
     for images, target in metric_logger.log_every(data_loader, 10, header):
-        images = images.to(device, non_blocking=True)
-        target = target.to(device, non_blocking=True)
+        images = images
+        target = target
 
         # compute output
         with paddle.amp.auto_cast():
@@ -197,7 +197,7 @@ def shot_acc(preds, labels, train_class_count, many_shot_thr=100, low_shot_thr=2
 
 
 @paddle.no_grad()
-def evaluate_LT(data_loader, model, device, args=None, tokens=None, labels=None, prefix='val'):
+def evaluate_LT(data_loader, model, args=None, tokens=None, labels=None, prefix='val'):
     two_branch = args.two_branch
 
     criterion = paddle.nn.CrossEntropyLoss()
@@ -286,7 +286,7 @@ def evaluate_LT(data_loader, model, device, args=None, tokens=None, labels=None,
 
 
 @paddle.no_grad()
-def calc_class_acc(data_loader, model, device, args=None, tokens=None, prefix='val'):
+def calc_class_acc(data_loader, model, args=None, tokens=None, prefix='val'):
     '''calculate accuracy for each class separately'''
     criterion = paddle.nn.CrossEntropyLoss()
     two_branch = args.two_branch
@@ -294,15 +294,15 @@ def calc_class_acc(data_loader, model, device, args=None, tokens=None, prefix='v
     header = 'Test:'
     # switch to evaluation mode
     model.eval()
-    texts = tokens.to(device, non_blocking=True) if tokens is not None else None
+    texts = tokens if tokens is not None else None
 
     labels = data_loader.dataset.targets
     labels = np.array(labels).astype(int)
     cnt_per_class = [len(labels[labels == l]) for l in range(args.nb_classes)]
     true_per_class = [0] * args.nb_classes
     for images, target in metric_logger.log_every(data_loader, 10, header):
-        images = images.to(device, non_blocking=True)
-        target = target.to(device, non_blocking=True)
+        images = images
+        target = target
 
         inputs = (images, texts) if texts is not None else images
         # compute output
@@ -349,7 +349,7 @@ def multi_label_acc1(output: paddle.Tensor, target: paddle.Tensor):
 
 
 @paddle.no_grad()
-def evaluate_pretrain(data_loader: DataLoader, model, device, labels=None, args=None, load_cache=True, topk=(5, 1),
+def evaluate_pretrain(data_loader: DataLoader, model, labels=None, args=None, load_cache=True, topk=(5, 1),
                       prefix='val'):
     # switch to evaluation mode
     start_time = time.time()
@@ -485,7 +485,7 @@ def evaluate_pretrain(data_loader: DataLoader, model, device, labels=None, args=
 
 
 @paddle.no_grad()
-def select_sent(data_loader: DataLoader, model, device, args=None, load_cache=True, topk=(5, 1), prefix='val'):
+def select_sent(data_loader: DataLoader, model, args=None, load_cache=True, topk=(5, 1), prefix='val'):
     # switch to evaluation mode
     start_time = time.time()
     model.eval()
@@ -525,14 +525,14 @@ def select_sent(data_loader: DataLoader, model, device, args=None, load_cache=Tr
         image_targets = []
         iter = tqdm(data_loader, desc="image embeddings") if load_cache else data_loader
         for images, target in iter:
-            images = images.to(device, non_blocking=True)
+            images = images
             image_targets.append(target)
             # compute output
             with paddle.amp.auto_cast():
                 image_features = model.encode_image(images)
             image_embeddings.append(image_features.detach())
         image_embeddings = paddle.cat(image_embeddings)
-        image_targets = paddle.cat(image_targets).to(device)
+        image_targets = paddle.cat(image_targets)
         if utils.is_main_process(): np.save(img_embed_path, image_embeddings.cpu().numpy())
         if utils.is_main_process(): np.save(img_target_path, image_targets.cpu().numpy())
     # print("image_embeddings.shape: ", image_embeddings.shape) # [Ni, 1024]
@@ -548,7 +548,7 @@ def select_sent(data_loader: DataLoader, model, device, args=None, load_cache=Tr
         )
         iter = tqdm(tokens_loader_val, desc="text embeddings") if load_cache else tokens_loader_val
         for batch_tokens in iter:
-            batch_tokens = batch_tokens.to(device, non_blocking=True)
+            batch_tokens = batch_tokens
             # compute output
             with paddle.amp.auto_cast():
                 text_features = model.encode_text(batch_tokens)

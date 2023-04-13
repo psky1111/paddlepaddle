@@ -1,8 +1,10 @@
 from models.pretrain import CVLP_r50
+from models.finetune import LGR_r50,LGR_r50_test_api
 from clip import load_model,tokenize
 import argparse
 import paddle
 from PIL import Image
+import numpy as np
 def get_args_parser():
     parser = argparse.ArgumentParser('VL-LTR training and evaluation script', add_help=False)
     parser.add_argument('--fp32-resume', action='store_true', default=False)
@@ -177,7 +179,8 @@ def get_args_parser():
     parser.add_argument('--ensemble', action='store_true', help='Perform zero-shot evaluation for pretraining like CLIP')
     parser.set_defaults(ensemble=False)
     parser.add_argument('--dist-eval', action='store_true', default=False, help='Enabling distributed evaluation')
-    parser.add_argument('--num_workers', default=10, type=int)
+    parser.add_argument('--num_workers', default=2, type=int)
+    parser.add_argument('--nb_classes', default=10, type=int)
     parser.add_argument('--pin-mem', action='store_true',
                         help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
     parser.add_argument('--no-pin-mem', action='store_false', dest='pin_mem',
@@ -208,3 +211,9 @@ if __name__ == "__main__":
     #logits_per_image, logits_per_text = clip(image, text)
     model = CVLP_r50(pretrained=True,args=args)
     logits_per_image, logits_per_test = model([image, text])
+    test_embeddings = model.encode_text(text)
+    #np.save("txt_embed.npy", test_embeddings.cpu().numpy())
+    paddle.save(model.visual.state_dict(),"checkpoint.pdparams")
+    finetune_model = LGR_r50_test_api(pretrained=True,args=args,dataset=None)
+    finetune_model(image)
+    

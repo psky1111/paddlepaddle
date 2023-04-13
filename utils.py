@@ -11,6 +11,9 @@ import datetime
 import paddle
 import paddle.distributed as dist
 import os.path as osp
+import paddle.vision as vis
+from paddle import nn
+
 
 
 class SmoothedValue(object):
@@ -218,3 +221,35 @@ def init_distributed_mode(args):
     setup_for_distributed(args.rank == 0)
 
 
+def create_model():
+    models = vis.models.resnet50(pretrained=True)
+    return models
+
+
+
+class NativeScaler:
+    state_dict_key = "amp_scaler"
+
+    def __init__(self):
+        self._scaler = paddle.amp.GradScaler
+
+    def __call__(self, loss, optimizer, clip_grad=None, clip_mode='norm', parameters=None, create_graph=False):
+        assert clip_grad == None
+        self._scaler.scale(loss).backward(create_graph=create_graph)
+        self._scaler.step(optimizer)
+        self._scaler.update()
+
+    def state_dict(self):
+        return self._scaler.state_dict()
+
+    def load_state_dict(self, state_dict):
+        self._scaler.load_state_dict(state_dict)
+
+class SoftTargetCrossEntropy(nn.Layer):
+
+    def __init__(self):
+        super(SoftTargetCrossEntropy, self).__init__()
+
+    def forward(self, x: paddle.Tensor, target: paddle.Tensor) -> paddle.Tensor:
+        loss = paddle.sum(-target * paddle.nn.functional.log_softmax(x, dim=-1), dim=-1)
+        return paddle.mean(loss)

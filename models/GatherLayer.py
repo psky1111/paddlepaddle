@@ -19,4 +19,4 @@ class GatherLayer(PyLayer):
         input, = ctx.saved_tensors
         grad_out = paddle.zeros_like(input)
         grad_out[:] = grads[dist.get_rank()] * dist.get_world_size()
-        return 
+        return grad_out

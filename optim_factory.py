@@ -47,7 +47,7 @@ def add_weight_decay(model, weight_decay=1e-5, skip_list=()):
         {'params': decay, 'weight_decay': weight_decay}]
 
 
-def create_optimizer(args, model, filter_bias_and_bn=True):
+def create_optimizer(args, model, filter_bias_and_bn=True,lr_scheduler=None):
     opt_lower = args.opt.lower()
     weight_decay = args.weight_decay
     if weight_decay and filter_bias_and_bn:
@@ -62,8 +62,10 @@ def create_optimizer(args, model, filter_bias_and_bn=True):
         weight_decay = 0.
     else:
         parameters = model.parameters()
-
-    opt_args = dict(lr=args.lr, weight_decay=weight_decay)
+    lr = args.lr
+    if lr_scheduler:
+        lr = lr_scheduler
+    opt_args = dict(lr=lr, weight_decay=weight_decay)
     if hasattr(args, 'opt_eps') and args.opt_eps is not None:
         opt_args['eps'] = args.opt_eps
     if hasattr(args, 'opt_betas') and args.opt_betas is not None:
