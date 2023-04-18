@@ -17,8 +17,8 @@ def load_json(filename):
 
 class SentPreProcessor(object):
 
-    def __init__(self, root, dataset: str="INAT"):
-        assert dataset in ['PLACES_LT', "IMNET", "IMNET_LT", "INAT"]
+    def __init__(self, root, dataset: str="IMNET_LT"):
+        assert dataset in ['PLACES_LT', "IMNET", "IMNET_LT"]
         self.root = root
         if dataset == "INAT":
             self.categories: List = load_json(
