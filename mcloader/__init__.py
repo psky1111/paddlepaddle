@@ -1,1 +1,1 @@
-from .classification import ClassificationDatasets
+from .classification import ClassificationDataset

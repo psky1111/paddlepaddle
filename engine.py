@@ -9,7 +9,7 @@ from collections import Counter
 
 import paddle
 import paddle.distributed as dist
-from paddle.io import DataLoader, SequenceSampler,DistributedBatchSampler,RandomSampler
+from paddle.io import DataLoader, SequenceSampler,DistributedBatchSampler,RandomSampler,BatchSampler
 
 
 
@@ -24,8 +24,9 @@ import paddle.nn.functional as F
 
 
 def labels2idxs(labels: paddle.Tensor):
-    targets = paddle.stack(
-        [labels[i] == labels for i in range(labels.shape[0])])
+    #labels = paddle.cast(labels,paddle.int32)
+    buff = [paddle.cast(labels[i] == labels,dtype=paddle.int32) for i in range(labels.shape[0])]
+    targets = paddle.stack(buff)
     return targets
 
 
@@ -39,7 +40,7 @@ def train_one_epoch(model: paddle.nn.Layer, criterion: DistillationLoss,
     pretrain_cvlp = args.pretrain_cvlp
     two_branch = args.two_branch
 
-    model.train(set_training_mode)
+    model.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
@@ -48,20 +49,20 @@ def train_one_epoch(model: paddle.nn.Layer, criterion: DistillationLoss,
     sent_idxs = getattr(data_loader.dataset, 'end_idxs', None)
 
     for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
-
+        #target dimension
         if pretrain_cvlp:
             idxs = [np.random.randint(sent_idxs[t]) for t in targets]
             tokens = paddle.stack([text_tokens[targets[i]][idxs[i]] for i in range(len(targets))])
 
             if dist.is_initialized():
-                targets = paddle.cat(GatherLayer.apply(targets), 0)
+                targets = paddle.concat(GatherLayer.apply(targets), 0)
             targets = labels2idxs(targets)
-            targets = targets.type_as(samples)
+            targets = paddle.cast(targets,samples.dtype)
 
             if mixup_fn is not None:
                 targets_o = targets
                 if dist.is_initialized():
-                    samples = paddle.cat(GatherLayer.apply(samples), 0)
+                    samples = paddle.concat(GatherLayer.apply(samples), 0)
                 samples, targets = mixup_fn(samples, targets)
                 if dist.is_initialized():
                     gpu_idx = utils.get_rank()
@@ -71,9 +72,9 @@ def train_one_epoch(model: paddle.nn.Layer, criterion: DistillationLoss,
             samples = (samples, tokens)
         elif mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
-
-        with paddle.amp.auto_cast(enabled=not fp32):
-            outputs = model(samples)
+        outputs = model(samples)
+        with paddle.amp.auto_cast():
+            
             if two_branch:
                 loss0 = criterion(samples, outputs[0], targets)
                 loss1 = criterion(samples, outputs[1], targets)
@@ -93,12 +94,13 @@ def train_one_epoch(model: paddle.nn.Layer, criterion: DistillationLoss,
             print("Loss is {}, stopping training".format(loss_value))
             sys.exit(1)
 
-        optimizer.clear_grad()
+        
 
         # this attribute is added by timm on one optimizer (adahessian)
         is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
         loss_scaler(loss, optimizer, clip_grad=max_norm,
                     parameters=model.parameters(), create_graph=is_second_order)
+        optimizer.clear_grad()
 
         paddle.device.cuda.synchronize()
         if model_ema is not None:
@@ -113,7 +115,7 @@ def train_one_epoch(model: paddle.nn.Layer, criterion: DistillationLoss,
             metric_logger.meters['img_acc1'].update(img_acc1.item(), n=batch_size)
             metric_logger.meters['text_acc1'].update(text_acc1.item(), n=batch_size)
         metric_logger.update(loss=loss_value)
-        metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+        metric_logger.update(lr=optimizer.get_lr())
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
@@ -145,8 +147,8 @@ def evaluate(data_loader, model, args=None, tokens=None):
                 batch_size = images.shape[0]
                 loss0 = criterion(output[0], target)
                 loss1 = criterion(output[1], target)
-                acc0_1, acc0_5 = paddle.metric.accuracy(output[0], target, topk=1),paddle.metric.accuracy(output[0], target, topk=5)
-                acc1_1, acc1_5 = paddle.metric.accuracy(output[1], target, topk=1),paddle.metric.accuracy(output[1], target, topk=5)
+                acc0_1, acc0_5 = utils.accuracy(output[0], target, topk=(1,5))
+                acc1_1, acc1_5 = utils.accuracy(output[1], target, topk=(1,5))
 
                 metric_logger.update(loss0=loss0.item())
                 metric_logger.update(loss1=loss1.item())
@@ -156,7 +158,7 @@ def evaluate(data_loader, model, args=None, tokens=None):
                 metric_logger.meters['acc1_5'].update(acc1_5.item(), n=batch_size)
             else:
                 loss = criterion(output, target)
-                acc1, acc5 = paddle.metric.accuracy(output, target, topk=1),paddle.metric.accuracy(output[0], target, topk=5)
+                acc1, acc5 = utils.accuracy(output, target, topk=(1,5))
                 batch_size = images.shape[0]
                 metric_logger.update(loss=loss.item())
                 metric_logger.meters['acc1'].update(acc1.item(), n=batch_size)
@@ -167,7 +169,7 @@ def evaluate(data_loader, model, args=None, tokens=None):
     print('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
           .format(top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss))
 
-    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    return {k: meter.global_avg*100 for k, meter in metric_logger.meters.items()}
 
 
 def shot_acc(preds, labels, train_class_count, many_shot_thr=100, low_shot_thr=20):
@@ -207,29 +209,28 @@ def evaluate_LT(data_loader, model, args=None, tokens=None, labels=None, prefix=
 
     # switch to evaluation mode
     model.eval()
-    texts = tokens.to(device, non_blocking=True) if tokens is not None else None
+    texts = tokens if tokens is not None else None
 
     training_labels = np.array(labels).astype(int)
     train_class_count = [len(training_labels[training_labels == l]) for l in range(args.nb_classes)]
     for images, target in metric_logger.log_every(data_loader, 10, header):
-        images = images.to(device, non_blocking=True)
-        target = target.to(device, non_blocking=True)
+        images = images
+        target = paddle.reshape(target,(-1,1))
 
         inputs = (images, texts) if texts is not None else images
         # compute output
+        output = model(inputs)
         with paddle.amp.auto_cast():
-            output = model(inputs)
-
             if two_branch:
                 batch_size = images.shape[0]
                 loss0 = criterion(output[0], target)
                 loss1 = criterion(output[1], target)
                 loss = loss0 + loss1
-                acc0_1, acc0_5 = paddle.metric.accuracy(output[0], target, topk=1),paddle.metric.accuracy(output[0], target, topk=5)
-                acc1_1, acc1_5 = paddle.metric.accuracy(output[1], target, topk=1),paddle.metric.accuracy(output[1], target, topk=5)
+                acc0_1, acc0_5 = utils.accuracy(output[0], target, topk=(1,5))
+                acc1_1, acc1_5 = utils.accuracy(output[1], target, topk=(1,5))
                 alpha = 0.7 if 'INAT' in args.data_set else 0.2
                 buff_output = F.softmax(output[0],axis=1) * alpha + F.softmax(output[1],axis=1)*(1-alpha)
-                acc1, acc5 = paddle.metric.accuracy(buff_output, target, topk=1),paddle.metric.accuracy(buff_output, target, topk=5)
+                acc1, acc5 = utils.accuracy(buff_output, target, topk=(1,5))
                 #acc1, acc5 = accuracy(output[0].softmax(1) * alpha + output[1].softmax(1) * (1-alpha), target, topk=(1, 5))
 
                 metric_logger.update(loss=loss.item())
@@ -247,13 +248,14 @@ def evaluate_LT(data_loader, model, args=None, tokens=None, labels=None, prefix=
                 #_, preds = output_.topk(1, 1, True, True)
                 preds = paddle.squeeze(preds,axis=-1)
                 #preds = preds.squeeze(-1)
+                target = paddle.squeeze(target,axis=-1)
                 shot_cnt_stats = shot_acc(preds, target, train_class_count)
                 for stat_name in shot_cnt_stats:
                     metric_logger.meters[stat_name].update(shot_cnt_stats[stat_name][-1],
                                                            n=shot_cnt_stats[stat_name][-2])
             else:
                 loss = criterion(output, target)
-                acc1, acc5 = paddle.metric.accuracy(output, target, topk=1),paddle.metric.accuracy(output, target, topk=5)
+                acc1, acc5 = paddle.metric.accuracy(output, target, k=1),paddle.metric.accuracy(output, target, k=1)
                 batch_size = images.shape[0]
                 metric_logger.update(loss=loss.item())
                 metric_logger.meters['acc1'].update(acc1.item(), n=batch_size)
@@ -282,7 +284,7 @@ def evaluate_LT(data_loader, model, args=None, tokens=None, labels=None, prefix=
         print('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
               .format(top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss))
 
-    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    return {k: meter.global_avg*100 for k, meter in metric_logger.meters.items()}
 
 
 @paddle.no_grad()
@@ -314,11 +316,11 @@ def calc_class_acc(data_loader, model, args=None, tokens=None, prefix='val'):
                 loss = loss0 + loss1
                 alpha = 0.7 if 'INAT' in args.data_set else 0.2
                 buff_output = F.softmax(output[0],axis=1) * alpha + F.softmax(output[1],axis=1)*(1-alpha)
-                acc1, acc5 = paddle.metric.accuracy(buff_output, target, topk=1),paddle.metric.accuracy(buff_output, target, topk=5)
+                acc1, acc5 = utils.accuracy(buff_output, target, topk= (1,5))
                 output = output[0] + output[1]
             else:
                 loss = criterion(output, target)
-                acc1, acc5 = paddle.metric.accuracy(output, target, topk=1),paddle.metric.accuracy(output, target, topk=5)
+                acc1, acc5 = utils.accuracy(output, target, topk= (1,5))
         batch_size = images.shape[0]
         metric_logger.update(loss=loss.item())
         metric_logger.meters['acc1'].update(acc1.item(), n=batch_size)
@@ -359,7 +361,7 @@ def evaluate_pretrain(data_loader: DataLoader, model, labels=None, args=None, lo
     text_tokens = getattr(data_loader.dataset, 'text_tokens', None)
     assert text_tokens is not None and isinstance(text_tokens, List), \
         "text_tokens is None, This function only supports pretraining phase"
-    text_tokens = paddle.cat(text_tokens)
+    text_tokens = paddle.concat(text_tokens)
     sent_idxs = getattr(data_loader.dataset, 'end_idxs', None)
     assert sent_idxs is not None and isinstance(sent_idxs, List)
     targets = paddle.to_tensor(data_loader.dataset.targets)
@@ -371,6 +373,9 @@ def evaluate_pretrain(data_loader: DataLoader, model, labels=None, args=None, lo
     
     # step 1. obtain all embeddings of image and text
     image_embeddings, text_embeddings = None, None
+    cache_dir = osp.dirname(args.resume)
+    img_embed_path = osp.join(cache_dir, "%s_img_embed.npy" % prefix)
+    txt_embed_path = osp.join(cache_dir, "txt_embed.npy")
     if args.resume:
         cache_dir = osp.dirname(args.resume)
         img_embed_path = osp.join(cache_dir, "%s_img_embed.npy" % prefix)
@@ -392,27 +397,25 @@ def evaluate_pretrain(data_loader: DataLoader, model, labels=None, args=None, lo
             with paddle.amp.auto_cast():
                 image_features = model.encode_image(images)
             image_embeddings.append(image_features.detach())
-        image_embeddings = paddle.cat(image_embeddings)
+        image_embeddings = paddle.concat(image_embeddings)
         if utils.is_main_process(): np.save(img_embed_path, image_embeddings.cpu().numpy())
     # print("image_embeddings.shape: ", image_embeddings.shape) # [Ni, 1024]
 
     # text
     if text_embeddings is None:
         text_embeddings = []
-        tokens_loader_val = DataLoader(
-            text_tokens, sampler=SequenceSampler(text_tokens),
-            batch_size=int(8 * args.batch_size),
-            num_workers=args.num_workers, pin_memory=args.pin_mem,
-            drop_last=False
+        tokens_loader_val = DataLoader(dataset= text_tokens,batch_sampler= BatchSampler(sampler = SequenceSampler(text_tokens),batch_size= int(8 * args.batch_size)),
+            num_workers=args.num_workers,
         )
         iter = tqdm(tokens_loader_val, desc="text embeddings") if load_cache else tokens_loader_val
+        print(tokens_loader_val)
         for batch_tokens in iter:
             batch_tokens = batch_tokens
             # compute output
             with paddle.amp.auto_cast():
                 text_features = model.encode_text(batch_tokens)
             text_embeddings.append(text_features.detach())
-        text_embeddings = paddle.cat(text_embeddings)
+        text_embeddings = paddle.concat(text_embeddings)
         if utils.is_main_process(): np.save(txt_embed_path, text_embeddings.cpu().numpy())
     # print("text_embeddings.shape: ", text_embeddings.shape) # [Nt, 1024]
     if args.ensemble:
@@ -434,20 +437,18 @@ def evaluate_pretrain(data_loader: DataLoader, model, labels=None, args=None, lo
     # image
     def get_pred(embeddings_A, embeddings_B, topk=1, desc=''):
         embeddings_loader = DataLoader(
-            embeddings_A.cpu(), sampler=SequenceSampler(embeddings_A),
-            batch_size=int(8 * args.batch_size),
-            num_workers=args.num_workers, pin_memory=args.pin_mem,
-            drop_last=False
+            embeddings_A, batch_sampler= BatchSampler(sampler = SequenceSampler(embeddings_A),batch_size= int(8 * args.batch_size)),
+            num_workers=args.num_workers,
         )
         iter = tqdm(embeddings_loader, desc=desc) if load_cache else embeddings_loader
         preds = []
         for batch_embeddings in iter:
-            batch_embeddings = batch_embeddings.to(device, non_blocking=True)
+            batch_embeddings = batch_embeddings
             batch_logits = batch_embeddings @ embeddings_B.t()
             _, batch_preds = paddle.topk(batch_logits,topk,1)
             #_, batch_preds = batch_logits.topk(topk, dim=1, largest=True, sorted=True)  # [BN, topk]
             preds.append(batch_preds)
-        preds = paddle.cat(preds)
+        preds = paddle.concat(preds)
         return preds
     
     pred_image = get_pred(image_embeddings, text_embeddings, 
@@ -479,7 +480,7 @@ def evaluate_pretrain(data_loader: DataLoader, model, labels=None, args=None, lo
     paddle.device.cuda.synchronize()
     total_time = str(datetime.timedelta(seconds=int(time.time() - start_time)))
     print("* image_Acc@1: {:.3f}% text_Acc@1 {:.3f}% knn_Acc@5 {:.3f}% Total time: {}".format(
-        image_acc1, text_acc1, knn_acc, total_time))
+        image_acc1.item(), text_acc1.item(), knn_acc.item(), total_time))
     return {"image_acc1": image_acc1.item(), "text_acc1": text_acc1.item(),
             f"knn_{max(topk)}": knn_acc.item(), **img_shot_acc, **knn_shot_acc}
 
@@ -494,10 +495,10 @@ def select_sent(data_loader: DataLoader, model, args=None, load_cache=True, topk
     text_tokens = getattr(data_loader.dataset, 'text_tokens', None)
     assert text_tokens is not None and isinstance(text_tokens, List), \
         "text_tokens is None, This function only supports pretraining phase"
-    text_tokens = paddle.cat(text_tokens)
+    text_tokens = paddle.concat(text_tokens)
     sent_idxs = getattr(data_loader.dataset, 'end_idxs', None)
     assert sent_idxs is not None and isinstance(sent_idxs, List)
-    text_targets = paddle.empty((sum(sent_idxs),), dtype=paddle.int64).to(device)  # [Nt,]
+    text_targets = paddle.empty((sum(sent_idxs),), dtype=paddle.int64)  # [Nt,]
     left = 0
     for i in range(len(sent_idxs)):
         text_targets[left : left + sent_idxs[i]] = i
@@ -531,8 +532,8 @@ def select_sent(data_loader: DataLoader, model, args=None, load_cache=True, topk
             with paddle.amp.auto_cast():
                 image_features = model.encode_image(images)
             image_embeddings.append(image_features.detach())
-        image_embeddings = paddle.cat(image_embeddings)
-        image_targets = paddle.cat(image_targets)
+        image_embeddings = paddle.concat(image_embeddings)
+        image_targets = paddle.concat(image_targets)
         if utils.is_main_process(): np.save(img_embed_path, image_embeddings.cpu().numpy())
         if utils.is_main_process(): np.save(img_target_path, image_targets.cpu().numpy())
     # print("image_embeddings.shape: ", image_embeddings.shape) # [Ni, 1024]
@@ -541,10 +542,8 @@ def select_sent(data_loader: DataLoader, model, args=None, load_cache=True, topk
     if text_embeddings is None:
         text_embeddings = []
         tokens_loader_val = DataLoader(
-            text_tokens, sampler=SequenceSampler(text_tokens),
-            batch_size=int(8 * args.batch_size),
-            num_workers=args.num_workers, pin_memory=args.pin_mem,
-            drop_last=False
+            batch_sampler=SequenceSampler(text_tokens),
+            num_workers=args.num_workers
         )
         iter = tqdm(tokens_loader_val, desc="text embeddings") if load_cache else tokens_loader_val
         for batch_tokens in iter:
@@ -553,13 +552,13 @@ def select_sent(data_loader: DataLoader, model, args=None, load_cache=True, topk
             with paddle.amp.auto_cast():
                 text_features = model.encode_text(batch_tokens)
             text_embeddings.append(text_features.detach())
-        text_embeddings = paddle.cat(text_embeddings)
+        text_embeddings = paddle.concat(text_embeddings)
         if utils.is_main_process(): np.save(txt_embed_path, text_embeddings.cpu().numpy())
     # print("text_embeddings.shape: ", text_embeddings.shape) # [Nt, 1024]
 
     # step 2. compute cosine similarity for image and text
-    text_embeddings /= text_embeddings.norm(dim=-1, keepdim=True)
-    image_embeddings /= image_embeddings.norm(dim=-1, keepdim=True)
+    text_embeddings /= text_embeddings.norm(axis=-1, keepdim=True)
+    image_embeddings /= image_embeddings.norm(axis=-1, keepdim=True)
 
     text_ces = []
     iter = tqdm(range(text_embeddings.shape[0]), desc="ce for text embeddings") if load_cache else range(text_embeddings.shape[0])
@@ -568,7 +567,7 @@ def select_sent(data_loader: DataLoader, model, args=None, load_cache=True, topk
         logit = text_embedding @ image_embeddings.t() * model.logit_scale.exp()
         label = image_targets == text_targets[i]
         label = label / label.sum()
-        ce = paddle.sum(-label * F.log_softmax(logit, dim=-1), dim=-1)
+        ce = paddle.sum(-label * F.log_softmax(logit, axis=-1), axis=-1)
         text_ces.append(ce)
 
     text_ces = paddle.to_tensor(text_ces)

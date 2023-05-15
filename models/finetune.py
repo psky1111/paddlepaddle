@@ -6,7 +6,7 @@ import numpy as np
 import paddle
 from paddle.nn import functional as F
 from paddle import nn
-from paddle.fluid.layers import sequence_pad as pad_sequence
+from paddle.static.nn import sequence_pad as pad_sequence
 
 from models.weight_init import trunc_normal_, interpolate_pos_embed
 from models.pretrain import ModifiedResNet, VisionTransformer
@@ -46,6 +46,7 @@ class Mlp(nn.Layer):
 def masked_fill(x, mask, value):
     y = paddle.full(x.shape, value, x.dtype)
     return paddle.where(mask, y, x)
+
 class Attention(nn.Layer):
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
         super().__init__()
@@ -132,12 +133,12 @@ class Block(nn.Layer):
             x = self.fc(x)  # [Bq, Bk, 1]
         elif self.op_type == 'cosine':
             if logit_scale is not None:
-                qx_ = F.normalize(qx, p=2, dim=-1)
+                qx_ = F.normalize(qx, p=2, axis=-1)
                 if self.v_detach:
                     v_buff = paddle.linalg.norm(v,axis=-1,keepdim=True).detach()
                     v_ = v /v_buff
                 else:
-                    v_ = F.normalize(v, p=2, dim=-1)
+                    v_ = F.normalize(v, p=2, axis=-1)
                 x = paddle.einsum('qkc,qoc->qk', v_, qx_) * paddle.exp(logit_scale) 
             else:
                 x = paddle.einsum('qkc,qoc->qk', v, qx)
@@ -163,6 +164,7 @@ class Block(nn.Layer):
                     x2 = paddle.einsum('qkc,qoc->qk', v_, qx_) *  paddle.exp(logit_scale) 
             else:
                 x2 = paddle.einsum('qkc,qoc->qk', v, qx)
+            
 
             return x1, x2
 
@@ -230,7 +232,7 @@ class LGR(nn.Layer):
             if self.use_norm:
                 self.logit_scale = self.create_parameter(
                     (1,),
-                    default_initializer=Assign(paddle.ones([1]))
+                    default_initializer=Assign(paddle.ones([1])* np.log(1 / 0.07))
                 )
                 #self.logit_scale = paddle.ones([]) * np.log(1 / 0.07)
                 self.logit_scale.stop_gradient = True
@@ -254,7 +256,7 @@ class LGR(nn.Layer):
 
     def train(self, mode=True):
         """Convert the model into training mode while keep normalization layer freezed."""
-        super(LGR, self).train(mode)
+        super(LGR, self).train()
         if mode:
             if self.img_grad is False:
                 print('freeze visual norm')
@@ -313,7 +315,7 @@ class LGR(nn.Layer):
         # 根据idxs生成mask，>idxs的位置设为True，以防止pad 0的影响
         mask = paddle.arange(0,self.sent_length)
         mask = paddle.cast(mask,idxs.dtype)
-        mask = paddle.unsqueeze(mask,0)
+        mask = paddle.unsqueeze(mask,axis=0)
         #mask = torch.arange(0, self.sent_length).type_as(idxs).unsqueeze(0)
         mask = paddle.expand(mask,(idxs.shape[0], self.sent_length))
         mask = paddle.greater_than(mask, paddle.unsqueeze(idxs,axis=1)-1)
@@ -354,7 +356,8 @@ class LGR(nn.Layer):
                                         zip(split_sorted_idxs, split_text_embeddings)]
         else:
             split_text_embeddings = [s[self.sent_offset:self.sent_length+self.sent_offset, :] for s in split_text_embeddings]
-        split_text_embeddings = pad_sequence(split_text_embeddings, batch_first=True)
+        if self.select_sent != "rand":
+            split_text_embeddings = pad_sequence(split_text_embeddings,pad_value=0.0)
         self.text_embeddings.data = split_text_embeddings
         print("text embeddings loaded")
 
@@ -386,7 +389,7 @@ class LGR(nn.Layer):
                 if k.startswith("visual")
             }
 
-        info = self.load_dict(vis_state_dict)
+        info = self.set_state_dict(vis_state_dict)
         print('pretrained visual backbone loaded')
         print(info)
 
@@ -404,7 +407,7 @@ class LGR(nn.Layer):
             x = self.text_block( paddle.unsqueeze(x,axis=1), paddle.cast(self.text_embeddings,x.dtype),
                                 key_padding_mask=self.text_padding_mask,
                                 logit_scale=self.logit_scale)
-        else:
+        else:   
             x = self.fc(x)
         return x
 
@@ -439,9 +442,9 @@ def LGR_r50_test_api(pretrained=False, **kwargs):
     )
 
     return model
-def LGR_r50(pretrained=False, **kwargs):
-    args = kwargs['args']
-    dataset = kwargs['dataset']
+def LGR_r50(pretrained=False, args=None,dataset=None):
+    args = args
+    dataset = dataset
     sent_idxs = getattr(dataset, 'end_idxs', None)
 
     model = LGR(
@@ -456,7 +459,7 @@ def LGR_r50(pretrained=False, **kwargs):
         sent_idxs=sent_idxs,
         use_norm=True,
         img_grad=False,
-        select_sent='val'
+        select_sent='rand'
     )
 
     vis_backbone_path = osp.join(args.pretrain_cvlp_path, "checkpoint.pth")

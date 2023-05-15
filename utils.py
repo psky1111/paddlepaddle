@@ -12,8 +12,10 @@ import paddle
 import paddle.distributed as dist
 import os.path as osp
 import paddle.vision as vis
+from models.pretrain import CVLP_r50
+from models.finetune import LGR_r50
 from paddle import nn
-
+import mmcv
 
 
 class SmoothedValue(object):
@@ -138,6 +140,8 @@ class MetricLogger(object):
         for obj in iterable:
             data_time.update(time.time() - end)
             yield obj
+            if len(iterable) == 0:
+                break
             iter_time.update(time.time() - end)
             if i % print_freq == 0 or i == len(iterable) - 1:
                 eta_seconds = iter_time.global_avg * (len(iterable) - i)
@@ -199,7 +203,7 @@ def is_main_process():
 
 def save_on_master(*args, **kwargs):
     if is_main_process():
-        paddle.save(*args, **kwargs)
+        paddle.save(args[0], args[1].as_posix())
 
 
 def init_distributed_mode(args):
@@ -221,8 +225,11 @@ def init_distributed_mode(args):
     setup_for_distributed(args.rank == 0)
 
 
-def create_model():
-    models = vis.models.resnet50(pretrained=True)
+def create_model(method = "pretrain",args=None,dataset=None):
+    if args.pretrain_cvlp:
+        models = CVLP_r50(pretrained=True,args=args)
+    else:
+        models = LGR_r50(pretrained=True,args=args,dataset=dataset)
     return models
 
 
@@ -231,11 +238,12 @@ class NativeScaler:
     state_dict_key = "amp_scaler"
 
     def __init__(self):
-        self._scaler = paddle.amp.GradScaler
+        self._scaler = paddle.amp.GradScaler()
 
     def __call__(self, loss, optimizer, clip_grad=None, clip_mode='norm', parameters=None, create_graph=False):
         assert clip_grad == None
-        self._scaler.scale(loss).backward(create_graph=create_graph)
+        scaled = self._scaler.scale(loss)
+        scaled.backward()
         self._scaler.step(optimizer)
         self._scaler.update()
 
@@ -251,5 +259,30 @@ class SoftTargetCrossEntropy(nn.Layer):
         super(SoftTargetCrossEntropy, self).__init__()
 
     def forward(self, x: paddle.Tensor, target: paddle.Tensor) -> paddle.Tensor:
-        loss = paddle.sum(-target * paddle.nn.functional.log_softmax(x, dim=-1), dim=-1)
+        loss = paddle.sum(-target * paddle.nn.functional.log_softmax(x, axis=-1), axis=-1)
         return paddle.mean(loss)
+    
+def update_from_config(args):
+    cfg = mmcv.Config.fromfile(args.config)
+    for _, cfg_item in cfg._cfg_dict.items():
+        for k, v in cfg_item.items():
+            setattr(args, k, v)
+    if args.output_dir == '':
+        config_name = args.config.split('/')[-1].replace('.py', '')
+        args.output_dir = osp.join('checkpoints', config_name)
+    if args.resume == '':
+        args.resume = osp.join(args.output_dir, 'checkpoint.pth')
+
+    return args
+
+
+def accuracy(output, target, topk=(1,)):
+    """Computes the accuracy over the k top predictions for the specified values of k"""
+    maxk = min(max(topk), output.shape[1])
+    batch_size = target.shape[0]
+    _, pred = paddle.topk(output,maxk,1,True,True)
+    pred = pred.t()
+    buff = target.reshape((1, -1)).expand_as(pred)
+    pred = paddle.cast(pred,buff.dtype)
+    correct = paddle.equal(pred, buff)
+    return [ paddle.sum(correct[:min(k, maxk)].reshape([-1]),axis=0) * 100. / batch_size for k in topk]

@@ -1,11 +1,11 @@
 # 8 GPU
 cfg = dict(
     model='LGR_r50',
-    desc_path='data/imagenet',
-    pretrained_clip='pretrained/RN50.pt',
+    desc_path='./data/imagenet',
+    pretrained_clip='./pretrained_models/RN50.pdparams',
     context_length=75,
     pretrain_cvlp=False,
-    pretrain_cvlp_path='checkpoints/pretrain_r50/',
+    pretrain_cvlp_path='./checkpoints/pretrain_r50/',
     loss_type="CE",
     two_branch=True,
 
@@ -25,5 +25,5 @@ cfg = dict(
 
     repeated_aug=False,
     clip_ms=True,
-    test=True,
+    test=False,
 )

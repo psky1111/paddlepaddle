@@ -9,7 +9,7 @@ def add_weight_decay_and_lr(model: nn.Layer, weight_decay=1e-5, text_lr=5e-4, sk
     text_nodecay = []
 
     for name, param in model.named_parameters():
-        if not param.requires_grad: continue
+        if  param.stop_gradient: continue
         no_decay = len(param.shape) == 1 or name.endswith(".bias") or name in skip_list
         visual = ((name.startswith("visual")) or ('visual' in name))
         if visual and no_decay:
@@ -36,7 +36,7 @@ def add_weight_decay(model, weight_decay=1e-5, skip_list=()):
     decay = []
     no_decay = []
     for name, param in model.named_parameters():
-        if not param.requires_grad:
+        if  param.stop_gradient:
             continue  # frozen weights
         if len(param.shape) == 1 or name.endswith(".bias") or name in skip_list:
             no_decay.append(param)
@@ -62,12 +62,13 @@ def create_optimizer(args, model, filter_bias_and_bn=True,lr_scheduler=None):
         weight_decay = 0.
     else:
         parameters = model.parameters()
+    parameters = model.parameters()
     lr = args.lr
     if lr_scheduler:
         lr = lr_scheduler
-    opt_args = dict(lr=lr, weight_decay=weight_decay)
+    opt_args = dict(learning_rate=lr, weight_decay=weight_decay)
     if hasattr(args, 'opt_eps') and args.opt_eps is not None:
-        opt_args['eps'] = args.opt_eps
+        opt_args['epsilon'] = args.opt_eps
     if hasattr(args, 'opt_betas') and args.opt_betas is not None:
         opt_args['betas'] = args.opt_betas
 
@@ -75,16 +76,16 @@ def create_optimizer(args, model, filter_bias_and_bn=True,lr_scheduler=None):
     opt_lower = opt_split[-1]
     if opt_lower == 'sgd' or opt_lower == 'nesterov':
         opt_args.pop('eps', None)
-        optimizer = optim.SGD(parameters, nesterov=True, **opt_args)
+        optimizer = optim.SGD(parameters=parameters, nesterov=True, **opt_args)
     elif opt_lower == 'momentum':
         opt_args.pop('eps', None)
-        optimizer = optim.SGD(parameters, nesterov=False, **opt_args)
+        optimizer = optim.SGD(parameters=parameters, nesterov=False, **opt_args)
     elif opt_lower == 'adam':
-        optimizer = optim.Adam(parameters, **opt_args)
+        optimizer = optim.Adam(parameters=parameters, **opt_args)
     elif opt_lower == 'adamw':
-        optimizer = optim.AdamW(parameters, **opt_args)
+        optimizer = optim.AdamW(parameters=parameters, **opt_args)
     elif opt_lower == 'adadelta':
-        optimizer = optim.Adadelta(parameters, **opt_args)
+        optimizer = optim.Adadelta(parameters=parameters, **opt_args)
     elif opt_lower == 'rmsprop':
         optimizer = optim.RMSProp(parameters, alpha=0.9, momentum=args.momentum, **opt_args)
     else:

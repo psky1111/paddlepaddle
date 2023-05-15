@@ -1,4 +1,4 @@
-from collections import OrderedDict
+import collections
 from typing import Tuple, Union
 import paddle.distributed as dist
 import numpy as np
@@ -8,9 +8,12 @@ from paddle import nn
 from models.weight_init import interpolate_pos_embed
 from models import GatherLayer
 from paddle.nn.initializer import Assign, Normal, Constant
+from models import mul
 
 
 __all__ = ["CVLP_r50", "CVLP_vit16"]
+
+
 
 class Identity(nn.Layer):
     def __init__(self):
@@ -24,7 +27,7 @@ class QuickGELU(nn.Layer):
     def forward(self, x):
         return x * nn.functional.sigmoid(1.702 * x)
     
-class MultiHeadAttention(nn.MultiHeadAttention):
+class MultiHeadAttention(mul.MultiHeadAttention):
     def __init__(self,
                  embed_dim,
                  num_heads,
@@ -93,36 +96,13 @@ class AttentionPool2d(nn.Layer):
         self.attn = MultiHeadAttention(embed_dim, num_heads, output_dim)
 
     def forward(self, x:paddle.Tensor):
-        x = paddle.reshape(x,(x.shape[0], x.shape[1], x.shape[2] * x.shape[3]))
-        x = paddle.transpose(x,(2, 0, 1)) # NCHW -> (HW)NC
-        x = paddle.concat([paddle.mean(x,axis=0,keepdim=True),x],axis=0) # (HW+1)NC
-        #x = torch.cat([x.mean(dim=0, keepdim=True), x], dim=0) 
-        #x = x + self.positional_embedding[:, None, :].to(x.dtype)  # (HW+1)NC
-        x = x + paddle.cast(self.positional_embedding[:,None,:],x.dtype)
-        
+        x = x.reshape((x.shape[0], x.shape[1], x.shape[2] *
+                       x.shape[3])).transpose((2, 0, 1))
+        x = paddle.concat([x.mean(axis=0, keepdim=True), x], axis=0)
+        x = x + self.positional_embedding.unsqueeze(1)
+        x = x.transpose((1, 0, 2))
         x = self.attn(query=x, key=x, value=x)
-
-        """
-        x, _ = F.multi_head_attention_forward(
-            query=x, key=x, value=x,
-            embed_dim_to_check=x.shape[-1],
-            num_heads=self.num_heads,
-            q_proj_weight=self.q_proj.weight,
-            k_proj_weight=self.k_proj.weight,
-            v_proj_weight=self.v_proj.weight,
-            in_proj_weight=None,
-            in_proj_bias=torch.cat([self.q_proj.bias, self.k_proj.bias, self.v_proj.bias]),
-            bias_k=None,
-            bias_v=None,
-            add_zero_attn=False,
-            dropout_p=0,
-            out_proj_weight=self.c_proj.weight,
-            out_proj_bias=self.c_proj.bias,
-            use_separate_proj_weight=True,
-            training=self.training,
-            need_weights=False
-        )
-        """
+        x = x.transpose((1, 0, 2))
         return x[0]
 
 
@@ -174,7 +154,6 @@ class ModifiedResNet(nn.Layer):
                 x = self.relu(bn(conv(x)))
             x = self.avgpool(x)
             return x
-        x = paddle.cast(x,self.conv1.weight.dtype)
         #x = x.type(self.conv1.weight.dtype)
         x = stem(x)
         x = self.layer1(x)
@@ -185,13 +164,7 @@ class ModifiedResNet(nn.Layer):
 
         return x
     
-class MultiHeadAttention(nn.MultiHeadAttention):
-    def __init__(self,
-                 embed_dim,
-                 num_heads,
-                 output_dim=None):
-        super(MultiHeadAttention, self).__init__(embed_dim, num_heads)
-        self.out_proj = nn.Linear(embed_dim, output_dim or embed_dim)
+
 
 class LayerNorm(nn.LayerNorm):
     """Subclass torch's LayerNorm to handle fp16."""
@@ -503,8 +476,8 @@ class CVLP(nn.Layer):
 
 
 
-def CVLP_r50(pretrained=False, **kwargs):
-    args = kwargs['args']
+def CVLP_r50(pretrained=False,args=None):
+    args = args
 
     model = CVLP(
         embed_dim=1024,

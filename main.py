@@ -17,22 +17,22 @@ from samplers import RASampler, WeightedDistributedSampler
 from engine import calc_class_acc, evaluate_LT, evaluate_pretrain, train_one_epoch, select_sent
 from optim_factory import create_optimizer
 from mixup import Mixup
-
+from clip import load_model
 import utils
 from utils import create_model,NativeScaler,SoftTargetCrossEntropy
 import os.path as osp
 import warnings
 
 warnings.filterwarnings('ignore')
-
+#paddle.device.set_device("gpu")
 
 def get_args_parser():
     parser = argparse.ArgumentParser('VL-LTR training and evaluation script', add_help=False)
     parser.add_argument('--fp32-resume', action='store_true', default=False)
-    parser.add_argument('--batch-size', default=128, type=int)
+    parser.add_argument('--batch-size', default=4, type=int)
     parser.add_argument('--epochs', default=300, type=int)
-    parser.add_argument('--config', required=True, type=str, help='config')
-    parser.add_argument('--pretrained-clip', default=None, type=str)
+    parser.add_argument('--config', type=str, help='config', default="./configs/imagelt/pretrain/pretrain_r50.py")
+    parser.add_argument('--pretrained-clip', default=True, type=str)
     parser.add_argument('--txt-embed-path', type=str, default=None, help='config')
     parser.add_argument('--vis-backbone-path', type=str, default=None, help='config')
     parser.add_argument('--two-branch', action='store_true', help='two branch output')
@@ -200,7 +200,7 @@ def get_args_parser():
     parser.add_argument('--ensemble', action='store_true', help='Perform zero-shot evaluation for pretraining like CLIP')
     parser.set_defaults(ensemble=False)
     parser.add_argument('--dist-eval', action='store_true', default=False, help='Enabling distributed evaluation')
-    parser.add_argument('--num_workers', default=10, type=int)
+    parser.add_argument('--num_workers', default=4, type=int)
     parser.add_argument('--pin-mem', action='store_true',
                         help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
     parser.add_argument('--no-pin-mem', action='store_false', dest='pin_mem',
@@ -215,7 +215,7 @@ def get_args_parser():
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
-    parser.add_argument("--port", default=29500, type=int,
+    parser.add_argument("--port", default=6070, type=int,
                         help="Master node (rank 0)'s free port that needs to "
                              "be used for communication during distributed "
                              "training")
@@ -231,7 +231,7 @@ def main(args):
 
     # fix the seed for reproducibility
     seed = args.seed 
-    paddle.manual_seed(seed)
+    paddle.seed(seed)
     np.random.seed(seed)
     # random.seed(seed)
 
@@ -245,22 +245,25 @@ def main(args):
         num_tasks = utils.get_world_size()
         global_rank = utils.get_rank()
         if args.repeated_aug:
-            sampler_train = RASampler(
+            sample = RASampler(
                 dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
             )
+            sampler_train = paddle.io.BatchSampler(sampler = sample, batch_size = args.batch_size)
         elif args.weight_sample:
             training_labels = np.array(dataset_train.targets).astype(int)
             train_class_counts = [len(training_labels[training_labels == l]) for l in range(args.nb_classes)]
             weights = 1. / paddle.to_tensor(train_class_counts, dtype=paddle.float32)
             if args.use_sqrt_freq: weights.sqrt_()
             samples_weights = weights[list(dataset_train.targets)]
-            sampler_train = WeightedDistributedSampler(
+            sample = WeightedDistributedSampler(
                 dataset=dataset_train, weights=samples_weights, replacement=True,
                 num_replicas=num_tasks, rank=global_rank, deterministic=True
             )
+            sampler_train = paddle.io.BatchSampler(sampler = sample, batch_size = args.batch_size)
         else:
             sampler_train = paddle.io.DistributedBatchSampler(
                 dataset_train,
+                batch_size = args.batch_size,
                 num_replicas=num_tasks,
                 # num_replicas=0,
                 rank=global_rank, shuffle=True,
@@ -274,38 +277,31 @@ def main(args):
                       'equal num of samples per-process.')
             sampler_val = paddle.io.DistributedBatchSampler(
                 dataset_val,
+                batch_size = args.batch_size,
                 # num_replicas=num_tasks,
                 num_replicas=0,
                 rank=global_rank, shuffle=False)
         else:
-            sampler_val = paddle.io.SequentialSampler(dataset_val)
+            sample = paddle.io.SequenceSampler(dataset_val)
+            sampler_val =  paddle.io.BatchSampler(sampler = sample, batch_size = args.batch_size)
     else:
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
 
     data_loader_train = paddle.io.DataLoader(
-        dataset_train, sampler=sampler_train,
-        batch_size=args.batch_size,
+        dataset_train, batch_sampler =sampler_train,
         num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
-        drop_last=args.drop_last,
     )
 
     data_loader_val =  paddle.io.DataLoader(
-        dataset_val, sampler=sampler_val,
-        batch_size=int(1.5 * args.batch_size),
+        dataset_val, batch_sampler =sampler_val,
         num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
-        drop_last=False
     )
 
     if args.test:
         data_loader_test =  paddle.io.DataLoader(
-            dataset_test, sampler= paddle.io.SequentialSampler(dataset_test),
-            batch_size=int(1.5 * args.batch_size),
+            dataset_test, batch_sampler = paddle.io.BatchSampler(sampler = paddle.io.SequenceSampler(dataset_test),batch_size = args.batch_size),
             num_workers=args.num_workers,
-            pin_memory=args.pin_mem,
-            drop_last=False
         )
 
     mixup_fn = None
@@ -318,8 +314,8 @@ def main(args):
             num_classes=args.nb_classes if not args.pretrain_cvlp else args.batch_size * utils.get_world_size()
         )
 
-    print(f"Creating model: {args.model}")
-    model = create_model()
+    print(f"Creating model: {args.model}") ##CVLP_r50
+    model = create_model(args=args,dataset=dataset_train)
 
 
     model_ema = None
@@ -331,7 +327,7 @@ def main(args):
 
     
     loss_scaler = NativeScaler()
-    lr_scheduler = paddle.optimizer.lr.CosineAnnealingDecay(args.lr,eta_min=1e-5, verbose=True)
+    lr_scheduler = paddle.optimizer.lr.CosineAnnealingDecay(args.lr,300,eta_min=1e-5, verbose=True)
     optimizer = create_optimizer(args, model_without_ddp,lr_scheduler)
 
     criterion = LabelSmoothingCrossEntropy()
@@ -369,21 +365,21 @@ def main(args):
             checkpoint['model'] =paddle.load(args.resume).state_dict()
         elif args.resume.startswith('https'):
             checkpoint = paddle.hub.load_state_dict_from_url(
-                args.resume, map_location='cpu', check_hash=True)
+                args.resume, check_hash=True)
         elif osp.exists(args.resume):
-            checkpoint = paddle.load(args.resume, map_location='cpu')
+            checkpoint = paddle.load(args.resume)
         else:
             checkpoint = None
 
         if checkpoint is not None:
             if 'model' in checkpoint:
-                msg = model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
+                msg = model_without_ddp.set_state_dict(checkpoint['model'])
             else:
-                msg = model_without_ddp.load_state_dict(checkpoint, strict=False)
+                msg = model_without_ddp.set_state_dict(checkpoint)
             print(msg)
             if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
-                optimizer.load_state_dict(checkpoint['optimizer'])
-                lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+                optimizer.set_state_dict(checkpoint['optimizer'])
+                lr_scheduler.set_state_dict(checkpoint['lr_scheduler'])
                 args.start_epoch = checkpoint['epoch'] + 1
                 if 'scaler' in checkpoint:
                     try:
@@ -399,9 +395,6 @@ def main(args):
 
         data_loader = data_loader_val
         prefix = 'val'
-        if args.test and not args.select:
-            data_loader = data_loader_test
-            prefix = 'test'
         if args.select and not args.test:
             data_loader = data_loader_train
             prefix = 'train'
@@ -433,7 +426,7 @@ def main(args):
     max_accuracy = 0.0
 
     for epoch in range(args.start_epoch, args.epochs):
-        loss_scaler._scaler = paddle.amp.GradScaler(enabled=not args.fp32_resume)
+        loss_scaler._scaler = paddle.amp.GradScaler(enable=not args.fp32_resume)
 
         if not args.debug:
             if args.distributed:
@@ -464,8 +457,9 @@ def main(args):
 
         if args.pretrain_cvlp:
             if args.eval_pretrain:
-                test_stats = evaluate_pretrain(data_loader_val, model, args=args, 
-                                        load_cache=False, labels=dataset_train.targets)
+                pass
+                #test_stats = evaluate_pretrain(data_loader_val, model, args=args, 
+                #                       load_cache=False, labels=dataset_train.targets)
         else:
             test_stats = evaluate_LT(data_loader_val, model, args=args,
                                      tokens=None, labels=dataset_train.targets)
@@ -482,13 +476,6 @@ def main(args):
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
-    if args.test:
-        if args.pretrain_cvlp:
-            test_stats = evaluate_pretrain(data_loader_test, model, args=args, 
-                                    load_cache=False, labels=dataset_train.targets, prefix='test')
-        else:
-            test_stats = evaluate_LT(data_loader_test, model, args=args,
-                                     tokens=None, labels=dataset_train.targets, prefix='test')
         log_stats = {f'test_{k}': v for k, v in test_stats.items()}
         if args.output_dir and utils.is_main_process():
             with (output_dir / "log.txt").open("a") as f:
@@ -501,8 +488,10 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('VL-LTR training and evaluation script', parents=[get_args_parser()])
+    load_model("RN50",pretrained=True)
     args = parser.parse_args()
     args = utils.update_from_config(args)
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+    args.resume = ""
     main(args)

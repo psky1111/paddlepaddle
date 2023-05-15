@@ -3,9 +3,8 @@ import re
 import json
 from tqdm import tqdm
 from typing import Dict, List, Union
-
-import torch
 from clip.tokenizer import Tokenizer
+import paddle
 
 from .prompt_template import prompt_templates
 
@@ -84,12 +83,12 @@ class SentPreProcessor(object):
             eot_token = self._tokenizer.encoder["<|endoftext|>"]  # 49407
             all_tokens = [[sot_token] + self._tokenizer.encode(text)[:context_length] + [eot_token] for text in
                             texts]
-            result = torch.zeros(len(all_tokens), context_length + 2, dtype=torch.long)
+            result = paddle.zeros((len(all_tokens), context_length + 2), dtype=paddle.int32)
             for i, tokens in enumerate(all_tokens):
                 if len(tokens) > context_length + 2:
                     raise RuntimeError(
                         f"Input {texts[i]} is too long for context length {context_length}")
-                result[i, :len(tokens)] = torch.tensor(tokens)
+                result[i, :len(tokens)] = paddle.to_tensor(tokens,dtype=paddle.int32)
             return result
         
         if isinstance(texts, str):

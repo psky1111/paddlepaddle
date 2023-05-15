@@ -4,19 +4,18 @@ from paddle.nn import functional as F
 from utils import create_model
 
 def cross_entropy(outputs, teacher_outputs):
-    logprobs = F.log_softmax(outputs, dim=-1)
-    soft_targets = F.softmax(teacher_outputs, dim=-1)
-    distill_loss = -paddle.sum(soft_targets * logprobs, dim=-1)
+    logprobs = F.log_softmax(outputs, axis=-1)
+    soft_targets = F.softmax(teacher_outputs, axis=-1)
+    distill_loss = -paddle.sum(soft_targets * logprobs, axis=-1)
     return paddle.mean(distill_loss)
 
 
 def kl_div(outputs1, outputs2, T=1.):
-    return F.kl_div(
-                F.log_softmax(outputs1 / T, dim=1),
-                F.log_softmax(outputs2 / T, dim=1),
+    return paddle.log(F.kl_div(
+                F.log_softmax(outputs1 / T, axis=1),
+                F.log_softmax(outputs2 / T, axis=1),
                 reduction='sum',
-                log_target=True
-            ) * (T * T) / paddle.numel(outputs1)
+            )) * (T * T) / paddle.numel(outputs1)
 
 
 class LabelSmoothingCrossEntropy(nn.Layer):
@@ -35,7 +34,7 @@ class LabelSmoothingCrossEntropy(nn.Layer):
         self.confidence = 1. - smoothing
 
     def forward(self, x: paddle.Tensor, target: paddle.Tensor):
-        logprobs = F.log_softmax(x, dim=-1)
+        logprobs = F.log_softmax(x, axis=-1)
         smooth_loss = -paddle.mean(logprobs,axis=-1)
         #smooth_loss = -logprobs.mean(dim=-1)
         if target.ndim == 1:
@@ -45,7 +44,7 @@ class LabelSmoothingCrossEntropy(nn.Layer):
             nll_loss = paddle.squeeze(nll_loss,axis=1)
         else:
             assert target.ndim == 2
-            nll_loss = -paddle.sum(target * logprobs, dim=-1)
+            nll_loss = -paddle.sum(target * logprobs, axis=-1)
         loss = self.confidence * nll_loss + self.smoothing * smooth_loss
         return paddle.mean(loss)
 
@@ -65,10 +64,10 @@ class PretrainSentLoss(nn.Layer):
             assert self.distill_type.startswith("logits")
             ######need to rechange
             teacher_model = args.teacher_model if args.teacher_model else args.model
-            self.teacher_model = create_model()
+            self.teacher_model = create_model(args=args)
             if args.teacher_path:
                 self.teacher_model.initialize_parameters(args.teacher_path)
-            self.teacher_model.requires_grad_(False)
+            self.teacher_model.stop_gradient = True
             self.fp32 = args.fp32_resume
             self.set_training_mode=set_training_mode
 
@@ -87,13 +86,13 @@ class PretrainSentLoss(nn.Layer):
             outputs1, outputs2 = outputs
             distill_loss = 0.
         if self.loss_type in ["softCE", "smoothCE"]:
-            labels = labels / paddle.sum(labels, dim=1, keepdim=True)
+            labels = labels / paddle.sum(labels, axis=1, keepdim=True)
         loss1 = self.base_criterion(outputs1, labels)
         loss2 = self.base_criterion(outputs2, labels)
         base_loss = (loss1 + loss2) / 2.0
         loss = (1 - self.alpha) * base_loss + self.alpha * distill_loss
         if self.beta > 0:
-            self.teacher_model.train(self.set_training_mode)
+            self.teacher_model.train()
             teacher_outputs1, teacher_outputs2 = self.teacher_model(inputs)
             teacher_outputs1, teacher_outputs2 = teacher_outputs1.detach(), teacher_outputs2.detach()
             if self.distill_type == 'logits_kl':
@@ -153,8 +152,8 @@ class DistillationLoss(nn.Layer):
         if self.distillation_type == 'soft':
             T = self.tau
             distillation_loss = F.kl_div(
-                F.log_softmax(outputs_kd / T, dim=1),
-                F.log_softmax(teacher_outputs / T, dim=1),
+                F.log_softmax(outputs_kd / T, axis=1),
+                F.log_softmax(teacher_outputs / T, axis=1),
                 reduction='sum',
                 log_target=True
             ) * (T * T) /  paddle.numel(outputs_kd)

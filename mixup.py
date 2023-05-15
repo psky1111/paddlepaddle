@@ -5,9 +5,9 @@ import paddle
 def one_hot(x:paddle.Tensor, num_classes, on_value=1., off_value=0.):
     x = paddle.reshape(paddle.cast(x,paddle.int64),(-1,1))
     # = x.long().view(-1, 1)
-    output = paddle.scatter(paddle.full(x.shape[0],num_classes,off_value),on_value)
+    output = paddle.nn.functional.one_hot(x,num_classes)
     #paddle.full((x.shape[0], num_classes), off_value, device=device).scatter_(1,x, on_value)
-    return 
+    return output
 
 
 def mixup_target(target: paddle.Tensor, num_classes, lam=1., smoothing=0.0):
@@ -193,14 +193,25 @@ class Mixup:
         if use_cutmix:
             (yl, yh, xl, xh), lam = cutmix_bbox_and_lam(
                 x.shape, lam, ratio_minmax=self.cutmix_minmax, correct_lam=self.correct_lam)
-            x[:, :, yl:yh, xl:xh] = paddle.flip(x,axis=0)[:, :, yl:yh, xl:xh]
+            #b,c,h,w = x.shape
+            #buff_ = paddle.flip(x,axis=0)
+            #for i in range(b):
+            #    for j in range(c):
+            #        for h_ in range(yl,yh):
+            #            for w_ in range(xl,xh):
+            #                x[i,j,h_,w_] = buff_[i,j,h_,w_]
+            x[:, :, yl:yh, xl:xh].set_value(paddle.flip(x,axis=0)[:, :, yl:yh, xl:xh])
+            #x[:, :, yl:yh, xl:xh] = paddle.flip(x,axis=0)[:, :, yl:yh, xl:xh]
         else:
-            x_flipped = paddle.flip(x,axis=0).mul_(1. - lam)
-            x.mul_(lam).add_(x_flipped)
+            x_buff = paddle.flip(x,axis=0)
+            x_flipped = (1. - lam) * x_buff
+            x = lam * x + x_flipped
+            #x.mul_(lam).add_(x_flipped)
         return lam
 
     def __call__(self, x, target):
         assert len(x) % 2 == 0, 'Batch size should be even when using this'
+        x = paddle.cast(x,paddle.float32)
         if self.mode == 'elem':
             lam = self._mix_elem(x)
         elif self.mode == 'pair':
@@ -218,6 +229,7 @@ class FastCollateMixup(Mixup):
 
     def _mix_elem_collate(self, output, batch, half=False):
         batch_size = len(batch)
+        batch = paddle.cast(batch,dtype=paddle.float32)
         num_elem = batch_size // 2 if half else batch_size
         assert len(output) == num_elem
         lam_batch, use_cutmix = self._params_per_elem(num_elem)
@@ -290,6 +302,7 @@ class FastCollateMixup(Mixup):
 
     def __call__(self, batch, _=None):
         batch_size = len(batch)
+        batch = paddle.cast(batch,dtype=paddle.float32)
         assert batch_size % 2 == 0, 'Batch size should be even when using this'
         half = 'half' in self.mode
         if half:

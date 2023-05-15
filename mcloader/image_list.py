@@ -16,17 +16,30 @@ class ImageList(object):
                 self.fns = [l.strip() for l in lines]
         elif isinstance(list_file, list):
             self.has_labels = len(list_file[0]) == 2
-            if self.has_labels:
+            if self.has_labels: 
                 self.fns, self.labels = zip(*list_file)
             else:
                 self.fns = list_file
-        
+                
+        n_fns = []
+        n_labels = []
+
+        for fns, label in zip(self.fns, self.labels):
+            _fns = root + '/'+ fns
+            if os.path.isfile(_fns):
+                n_fns.append(fns)
+                n_labels.append(label)
+        self.fns = n_fns
+        self.labels = n_labels
+
         if select:
             assert self.has_labels
             n_fns = []
             n_labels = []
             cls_cnt_dict = {}
             for fns, label in zip(self.fns, self.labels):
+                if os.path.isfile(fns) ==False:
+                    continue
                 if label not in cls_cnt_dict:
                     cls_cnt_dict[label] = 0
                 cls_cnt_dict[label] += 1

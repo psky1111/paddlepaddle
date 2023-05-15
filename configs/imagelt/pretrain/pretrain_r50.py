@@ -1,7 +1,7 @@
 cfg = dict(
     model='CVLP_r50',
-    desc_path='data/imagenet',
-    pretrained_clip='pretrained/RN50.pt',
+    desc_path='./data/imagenet',
+    pretrained_clip='./pretrained_models/RN50.pdparams',
     context_length=75,
     pretrain_cvlp=True,
     loss_type="smoothCE",
@@ -16,8 +16,8 @@ cfg = dict(
     lr=5e-5,
     min_lr=0.,
 
-    epochs=50,
-    batch_size=256,
+    epochs=30,
+    batch_size=128,
 
     repeated_aug=False,
     mixup=0.,
@@ -27,5 +27,5 @@ cfg = dict(
     distillation_type='logits',
 
     eval_pretrain=True,
-    test=True
+    test=False
 )
